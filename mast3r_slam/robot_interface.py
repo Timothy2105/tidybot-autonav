@@ -60,22 +60,11 @@ class RobotInterface:
         else:
             print("Robot interface in simulation mode")
     
-    def reset(self):
-        """Reset the robot base to initial position."""
-        if self.simulate:
-            print("SIMULATION: Resetting robot base")
-            return
-        
-        if self.connected and self.base:
-            try:
-                print("Resetting robot base...")
-                self.base.reset()
-                print("Robot base reset complete")
-            except Exception as e:
-                print(f"Error resetting robot: {e}")
-    
-    def get_state(self):
-        """Get current robot state."""
+    def get_state_obs(self):
+        """
+        Get current robot state observations (similar to common_real_env.py).
+        Returns wheel odometry from base.get_state().
+        """
         if self.simulate:
             # Return simulated state
             return {'base_pose': np.array([0.0, 0.0, 0.0])}
@@ -99,6 +88,33 @@ class RobotInterface:
         
         return {'base_pose': np.array([0.0, 0.0, 0.0])}
     
+    def get_obs(self):
+        """
+        Get complete observations (similar to common_real_env.py).
+        Currently only includes state observations, but could be extended with camera data.
+        """
+        obs = {}
+        obs.update(self.get_state_obs())
+        return obs
+    
+    def reset(self):
+        """Reset the robot base to initial position."""
+        if self.simulate:
+            print("SIMULATION: Resetting robot base")
+            return
+        
+        if self.connected and self.base:
+            try:
+                print("Resetting robot base...")
+                self.base.reset()
+                print("Robot base reset complete")
+            except Exception as e:
+                print(f"Error resetting robot: {e}")
+    
+    def get_state(self):
+        """Get current robot state (legacy method for compatibility)."""
+        return self.get_state_obs()
+    
     def execute_action(self, action):
         """
         Execute a robot action.
@@ -120,6 +136,7 @@ class RobotInterface:
     def move_to_base_waypoint(self, target_base_pose, threshold_pos=0.01, threshold_theta=0.01, max_steps=100):
         """
         Smoothly move the robot base to a target [y, x, theta] pose via interpolation.
+        Uses get_obs() to monitor position during movement (similar to common_real_env.py).
         
         Args:
             target_base_pose (array-like): [y, x, theta] target for the base (theta in radians)
@@ -148,8 +165,8 @@ class RobotInterface:
         print(f"Target in TidyBot format: [x={tidybot_target[0]:.3f}, y={tidybot_target[1]:.3f}, theta={np.degrees(tidybot_target[2]):.1f}°]")
         
         while step < max_steps:
-            # Get current state
-            obs = self.get_state()
+            # Get current state using get_obs() (similar to common_real_env.py)
+            obs = self.get_obs()
             curr_base_pose = np.array(obs["base_pose"])
             
             # Ensure we have a 3-element array [x, y, theta]
