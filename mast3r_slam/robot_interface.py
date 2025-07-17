@@ -22,12 +22,7 @@ except ImportError as e:
 
 class RobotInterface:
     def __init__(self, simulate=False):
-        """
-        Initialize robot interface for TidyBot.
-        
-        Args:
-            simulate (bool): If True, simulate commands instead of sending to real robot
-        """
+        """ Initialize robot interface for TidyBot. """
         self.simulate = simulate
         self.base = None
         self.connected = False
@@ -41,7 +36,7 @@ class RobotInterface:
                 # RPC proxy object
                 self.base = base_manager.Base(max_vel=(0.5, 0.5, 1.57), max_accel=(0.5, 0.5, 1.57))
                 
-                # Initialize the base (this creates the vehicle instance)
+                # Initialize the base
                 try:
                     self.base.reset()
                     self.connected = True
@@ -62,11 +57,11 @@ class RobotInterface:
     
     def get_state_obs(self):
         """
-        Get current robot state observations (similar to common_real_env.py).
+        Get current robot state observations.
         Returns wheel odometry from base.get_state().
         """
         if self.simulate:
-            # Return simulated state
+            # return simulated state
             return {'base_pose': np.array([0.0, 0.0, 0.0])}
         
         if self.connected and self.base:
@@ -133,6 +128,142 @@ class RobotInterface:
             except Exception as e:
                 print(f"Error executing robot action: {e}")
     
+    def rotate_in_place(self, target_angle_rad, threshold_theta=0.01, max_steps=100):
+        """
+        Rotate the robot in place without moving position.
+        
+        Args:
+            target_angle_rad (float): Target angle in radians
+            threshold_theta (float): Rotation error threshold (in radians) for stopping
+            max_steps (int): Maximum number of steps before giving up
+            
+        Returns:
+            bool: True if the target rotation is reached
+        """
+        if self.simulate:
+            print(f"SIMULATION: Rotating in place by {np.degrees(target_angle_rad):.1f}°")
+            return True
+        
+        if not self.connected:
+            print("Not connected to robot")
+            return False
+        
+        ALPHA = 0.1  # Interpolation factor
+        step = 0
+        
+        # Get current pose
+        obs = self.get_obs()
+        curr_pose = np.array(obs["base_pose"])
+        start_x, start_y = curr_pose[0], curr_pose[1]
+        start_theta = curr_pose[2]
+        
+        # Target is current position with new angle
+        target_theta = start_theta + target_angle_rad
+        
+        print(f"Rotating in place: {np.degrees(target_angle_rad):.1f}° (from {np.degrees(start_theta):.1f}° to {np.degrees(target_theta):.1f}°)")
+        
+        while step < max_steps:
+            # Get current state
+            obs = self.get_obs()
+            curr_pose = np.array(obs["base_pose"])
+            curr_x, curr_y, curr_theta = curr_pose[0], curr_pose[1], curr_pose[2]
+            
+            # Calculate rotation error
+            theta_error = target_theta - curr_theta
+            theta_error = np.arctan2(np.sin(theta_error), np.cos(theta_error))  # Normalize to [-pi, pi]
+            
+            # Calculate position drift (should stay near start position)
+            pos_drift = np.sqrt((curr_x - start_x)**2 + (curr_y - start_y)**2)
+            
+            print(f"[Step {step}] theta_err: {np.degrees(theta_error):.2f}°, pos_drift: {pos_drift:.4f}m")
+            print(f"  Current: [x={curr_x:.3f}, y={curr_y:.3f}, theta={np.degrees(curr_theta):.1f}°]")
+            
+            if abs(theta_error) < threshold_theta:
+                print("Target rotation reached!")
+                return True
+            
+            # Only update rotation, keep position fixed
+            next_theta = curr_theta + ALPHA * theta_error
+            
+            # Create target pose: keep current position, update only angle
+            next_pose = np.array([curr_x, curr_y, next_theta])
+            
+            # Execute action
+            self.execute_action({"base_pose": next_pose})
+            
+            time.sleep(POLICY_CONTROL_PERIOD)
+            step += 1
+        
+        print(f"Failed to reach target rotation after {max_steps} steps")
+        return False
+    
+    def move_forward(self, distance, threshold_pos=0.01, max_steps=100):
+        """
+        Move the robot forward by a specified distance.
+        
+        Args:
+            distance (float): Distance to move forward (positive) or backward (negative)
+            threshold_pos (float): Position error threshold for stopping
+            max_steps (int): Maximum number of steps before giving up
+            
+        Returns:
+            bool: True if the target distance is reached
+        """
+        if self.simulate:
+            print(f"SIMULATION: Moving forward by {distance:.3f}m")
+            return True
+        
+        if not self.connected:
+            print("Not connected to robot")
+            return False
+        
+        ALPHA = 0.1  # Interpolation factor
+        step = 0
+        
+        # Get current pose
+        obs = self.get_obs()
+        curr_pose = np.array(obs["base_pose"])
+        start_x, start_y, start_theta = curr_pose[0], curr_pose[1], curr_pose[2]
+        
+        # Calculate target position (move along current heading)
+        target_x = start_x + distance * np.cos(start_theta)
+        target_y = start_y + distance * np.sin(start_theta)
+        
+        print(f"Moving forward: {distance:.3f}m (from [{start_x:.3f}, {start_y:.3f}] to [{target_x:.3f}, {target_y:.3f}])")
+        
+        while step < max_steps:
+            # Get current state
+            obs = self.get_obs()
+            curr_pose = np.array(obs["base_pose"])
+            curr_x, curr_y, curr_theta = curr_pose[0], curr_pose[1], curr_pose[2]
+            
+            # Calculate position error
+            pos_error = np.array([target_x - curr_x, target_y - curr_y])
+            pos_error_norm = np.linalg.norm(pos_error)
+            
+            print(f"[Step {step}] pos_err: {pos_error_norm:.4f}m")
+            print(f"  Current: [x={curr_x:.3f}, y={curr_y:.3f}, theta={np.degrees(curr_theta):.1f}°]")
+            
+            if pos_error_norm < threshold_pos:
+                print("Target position reached!")
+                return True
+            
+            # Interpolate toward target position
+            next_x = curr_x + ALPHA * pos_error[0]
+            next_y = curr_y + ALPHA * pos_error[1]
+            
+            # Keep current orientation
+            next_pose = np.array([next_x, next_y, curr_theta])
+            
+            # Execute action
+            self.execute_action({"base_pose": next_pose})
+            
+            time.sleep(POLICY_CONTROL_PERIOD)
+            step += 1
+        
+        print(f"Failed to reach target position after {max_steps} steps")
+        return False
+
     def move_to_base_waypoint(self, target_base_pose, threshold_pos=0.01, threshold_theta=0.01, max_steps=100):
         """
         Smoothly move the robot base to a target [y, x, theta] pose via interpolation.
