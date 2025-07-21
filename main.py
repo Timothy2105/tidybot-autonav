@@ -689,6 +689,29 @@ if __name__ == "__main__":
                 if i % 15 == 0:
                     print(f"📷 LIVE CAMERA POSITION: x={translation[0]:.3f}, y={translation[1]:.3f}, z={translation[2]:.3f}")
                 
+                # Write camera position and orientation to file for calibration script to read
+                try:
+                    import json
+                    # Get camera orientation from current frame
+                    current_frame = states.get_frame()
+                    if current_frame is not None:
+                        T_WC = current_frame.T_WC
+                        # Extract quaternion from Sim3 transformation
+                        quaternion = T_WC.data[0, 3:7].cpu().numpy()  # quaternion part
+                        
+                        camera_data = {
+                            'x': float(translation[0]),
+                            'y': float(translation[1]),
+                            'z': float(translation[2]),
+                            'quaternion': [float(q) for q in quaternion],  # [w, x, y, z]
+                            'timestamp': time.time()
+                        }
+                        with open('camera_position.txt', 'w') as f:
+                            json.dump(camera_data, f)
+                except Exception as e:
+                    # Silently fail if we can't write the file
+                    pass
+                
                 # Trajectory following mode - only after relocalization
                 if args.follow_traj and trajectory_data is not None:
                     # Check if we've successfully relocalized
@@ -740,8 +763,7 @@ if __name__ == "__main__":
                             current_euler = rotation_matrix_to_euler_angles(current_rotation)
                             target_euler = rotation_matrix_to_euler_angles(target_rotation)
                             
-                            # Calculate movement in camera's local coordinate frame
-                            # First, apply the required rotation to get the movement in the rotated frame
+                            # Calculate movement and rotation in camera's local coordinate frame
                             
                             # Create rotation matrix from current camera orientation
                             def euler_to_rotation_matrix(roll, pitch, yaw):
@@ -769,6 +791,44 @@ if __name__ == "__main__":
                             left_movement = movement_in_camera_frame[1]     # Y-axis (left/right)
                             up_movement = movement_in_camera_frame[2]       # Z-axis (up/down)
                             
+                            # Calculate Y-axis rotation from quaternions (camera frame)
+                            # Convert quaternions to Euler angles and extract Y-axis rotation (pitch)
+                            def quaternion_to_euler_angles(q):
+                                """Convert quaternion to Euler angles (roll, pitch, yaw) in degrees"""
+                                w, x, y, z = q
+                                
+                                # Roll (x-axis rotation)
+                                sinr_cosp = 2 * (w * x + y * z)
+                                cosr_cosp = 1 - 2 * (x * x + y * y)
+                                roll = np.arctan2(sinr_cosp, cosr_cosp)
+                                
+                                # Pitch (y-axis rotation)
+                                sinp = 2 * (w * y - z * x)
+                                if abs(sinp) >= 1:
+                                    pitch = np.copysign(np.pi / 2, sinp)  # use 90 degrees if out of range
+                                else:
+                                    pitch = np.arcsin(sinp)
+                                
+                                # Yaw (z-axis rotation)
+                                siny_cosp = 2 * (w * z + x * y)
+                                cosy_cosp = 1 - 2 * (y * y + z * z)
+                                yaw = np.arctan2(siny_cosp, cosy_cosp)
+                                
+                                return np.array([np.degrees(roll), np.degrees(pitch), np.degrees(yaw)])
+                            
+                            # Get current and target Euler angles from quaternions
+                            current_euler_from_quat = quaternion_to_euler_angles(current_quat)
+                            target_euler_from_quat = quaternion_to_euler_angles(target_quat)
+                            
+                            # Calculate Y-axis rotation difference (pitch)
+                            y_rotation_deg = target_euler_from_quat[1] - current_euler_from_quat[1]
+                            
+                            # Normalize to [-180, 180] degrees
+                            while y_rotation_deg > 180:
+                                y_rotation_deg -= 360
+                            while y_rotation_deg < -180:
+                                y_rotation_deg += 360
+                            
                             print(f"TRAJECTORY FOLLOWING (After Relocalization):")
                             print(f"   Current Frame: {i}")
                             print(f"   Current Position: x={translation[0]:.3f}, y={translation[1]:.3f}, z={translation[2]:.3f}")
@@ -780,13 +840,14 @@ if __name__ == "__main__":
                             print(f"   World Movement: dx={movement_required[0]:.3f}, dy={movement_required[1]:.3f}, dz={movement_required[2]:.3f}")
                             print(f"   Camera Movement: forward={forward_movement:+.3f}, left={left_movement:+.3f}, up={up_movement:+.3f}")
                             print(f"   Total Movement: {np.linalg.norm(movement_required):.3f}")
-                            print(f"   Rotation Required: roll={rotation_required[0]:.1f}°, pitch={rotation_required[1]:.1f}°, yaw={rotation_required[2]:.1f}°")
-                            print(f"   Total Rotation: {np.linalg.norm(rotation_required):.1f}°")
+                            print(f"   World Rotation Required: roll={rotation_required[0]:.1f}°, pitch={rotation_required[1]:.1f}°, yaw={rotation_required[2]:.1f}°")
+                            print(f"   Camera Y-Axis Rotation (from quaternion): {y_rotation_deg:+.1f}°")
+                            print(f"   Total World Rotation: {np.linalg.norm(rotation_required):.1f}°")
                             
                             # Generate robot movement suggestions
                             print(f"ROBOT COMMANDS:")
-                            if abs(rotation_required[2]) > 5.0:  # If yaw rotation > 5 degrees
-                                print(f"   1. ROTATE: {rotation_required[2]:+.1f}° (yaw)")
+                            if abs(y_rotation_deg) > 5.0:  # If camera Y-axis rotation > 5 degrees
+                                print(f"   1. ROTATE: {y_rotation_deg:+.1f}° (camera Y-axis)")
                             if abs(forward_movement) > 0.05:  # If forward movement > 5cm
                                 direction = "FORWARD" if forward_movement > 0 else "BACKWARD"
                                 print(f"   2. MOVE {direction}: {abs(forward_movement):.3f}m")
@@ -807,7 +868,7 @@ if __name__ == "__main__":
                             # Convert movement to TidyBot format
                             tidybot_y = 0  # No up/down movement (camera is static)
                             tidybot_x = -left_movement  # Invert left movement for TidyBot coordinate system
-                            tidybot_rotation_deg = -rotation_required[2]  # Invert yaw rotation for TidyBot coordinate system
+                            tidybot_rotation_deg = -y_rotation_deg  # Use camera Y-axis rotation from quaternion
                             
                             # Apply thresholds to avoid tiny movements
                             if abs(tidybot_x) < 0.05:  # Less than 5cm

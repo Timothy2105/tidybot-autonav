@@ -5,6 +5,7 @@ import sys
 import os
 from pathlib import Path
 import datetime
+import json
 
 # add mast3r_slam path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -12,14 +13,54 @@ sys.path.insert(0, str(Path(__file__).parent))
 from mast3r_slam.robot_interface import RobotInterface
 
 
-def create_calib_results_folder():
-    """Create the calib-results folder and return the path."""
-    calib_dir = Path("calib-results")
-    calib_dir.mkdir(exist_ok=True)
-    return calib_dir
+def get_camera_position_from_slam():
+    """
+    Try to read the current camera position and orientation from SLAM system.
+    This reads from a shared file that the main SLAM process writes to.
+    
+    Returns:
+        tuple: (x, y, z, quaternion) camera position and orientation or None if not available
+    """
+    try:
+        # Look for a file that contains the current camera position and orientation
+        camera_pos_file = Path("camera_position.txt")
+        if camera_pos_file.exists():
+            with open(camera_pos_file, 'r') as f:
+                data = json.load(f)
+                position = (data['x'], data['y'], data['z'])
+                quaternion = data.get('quaternion', [1, 0, 0, 0])  # Default to identity quaternion
+                return (position[0], position[1], position[2], quaternion)
+    except Exception as e:
+        print(f"Warning: Could not read camera position: {e}")
+    
+    return None
 
 
-def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, camera_positions, success):
+def quaternion_to_euler_angles(q):
+    """Convert quaternion to Euler angles (roll, pitch, yaw) in degrees"""
+    w, x, y, z = q
+    
+    # Roll (x-axis rotation)
+    sinr_cosp = 2 * (w * x + y * z)
+    cosr_cosp = 1 - 2 * (x * x + y * y)
+    roll = np.arctan2(sinr_cosp, cosr_cosp)
+    
+    # Pitch (y-axis rotation)
+    sinp = 2 * (w * y - z * x)
+    if abs(sinp) >= 1:
+        pitch = np.copysign(np.pi / 2, sinp)  # use 90 degrees if out of range
+    else:
+        pitch = np.arcsin(sinp)
+    
+    # Yaw (z-axis rotation)
+    siny_cosp = 2 * (w * z + x * y)
+    cosy_cosp = 1 - 2 * (y * y + z * z)
+    yaw = np.arctan2(siny_cosp, cosy_cosp)
+    
+    return np.array([np.degrees(roll), np.degrees(pitch), np.degrees(yaw)])
+
+
+def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, start_camera_data, end_camera_data, success):
     """
     Log test results to the calibration file.
     
@@ -29,7 +70,8 @@ def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, 
         target_movement: Target movement [y, x, theta]
         start_pose: Starting robot pose [x, y, theta]
         end_pose: Ending robot pose [x, y, theta]
-        camera_positions: List of camera positions during test
+        start_camera_data: Starting camera data (x, y, z, quaternion) from SLAM
+        end_camera_data: Ending camera data (x, y, z, quaternion) from SLAM
         success: Whether the test was successful
     """
     log_file.write(f"\n{'='*60}\n")
@@ -40,27 +82,97 @@ def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, 
     # Target movement
     log_file.write(f"TARGET MOVEMENT: [y={target_movement[0]:.3f}, x={target_movement[1]:.3f}, theta={np.degrees(target_movement[2]):.1f}°]\n")
     
-    # Robot poses
-    log_file.write(f"ROBOT START POSE: [x={start_pose[0]:.3f}, y={start_pose[1]:.3f}, theta={np.degrees(start_pose[2]):.1f}°]\n")
-    log_file.write(f"ROBOT END POSE: [x={end_pose[0]:.3f}, y={end_pose[1]:.3f}, theta={np.degrees(end_pose[2]):.1f}°]\n")
+    # Robot poses (odometry)
+    log_file.write(f"ROBOT START POSE (ODOMETRY): [x={start_pose[0]:.3f}, y={start_pose[1]:.3f}, theta={np.degrees(start_pose[2]):.1f}°]\n")
+    log_file.write(f"ROBOT END POSE (ODOMETRY): [x={end_pose[0]:.3f}, y={end_pose[1]:.3f}, theta={np.degrees(end_pose[2]):.1f}°]\n")
     
-    # Actual movement (relative to start)
+    # Camera positions and orientations (SLAM)
+    if start_camera_data is not None:
+        start_pos = start_camera_data[:3]
+        start_quat = start_camera_data[3] if len(start_camera_data) > 3 else [1, 0, 0, 0]
+        start_euler = quaternion_to_euler_angles(start_quat)
+        log_file.write(f"CAMERA START POSITION (SLAM): [x={start_pos[0]:.3f}, y={start_pos[1]:.3f}, z={start_pos[2]:.3f}]\n")
+        log_file.write(f"CAMERA START ORIENTATION (SLAM): [roll={start_euler[0]:.1f}°, pitch={start_euler[1]:.1f}°, yaw={start_euler[2]:.1f}°]\n")
+    else:
+        log_file.write(f"CAMERA START POSITION (SLAM): Not available\n")
+        log_file.write(f"CAMERA START ORIENTATION (SLAM): Not available\n")
+    
+    if end_camera_data is not None:
+        end_pos = end_camera_data[:3]
+        end_quat = end_camera_data[3] if len(end_camera_data) > 3 else [1, 0, 0, 0]
+        end_euler = quaternion_to_euler_angles(end_quat)
+        log_file.write(f"CAMERA END POSITION (SLAM): [x={end_pos[0]:.3f}, y={end_pos[1]:.3f}, z={end_pos[2]:.3f}]\n")
+        log_file.write(f"CAMERA END ORIENTATION (SLAM): [roll={end_euler[0]:.1f}°, pitch={end_euler[1]:.1f}°, yaw={end_euler[2]:.1f}°]\n")
+    else:
+        log_file.write(f"CAMERA END POSITION (SLAM): Not available\n")
+        log_file.write(f"CAMERA END ORIENTATION (SLAM): Not available\n")
+    
+    # Actual movement (robot odometry)
     actual_movement = end_pose - start_pose
     actual_distance = np.linalg.norm(actual_movement[:2])
     actual_rotation = actual_movement[2]
-    log_file.write(f"ACTUAL MOVEMENT: [dx={actual_movement[0]:.3f}, dy={actual_movement[1]:.3f}, dtheta={np.degrees(actual_rotation):.1f}°]\n")
-    log_file.write(f"ACTUAL DISTANCE: {actual_distance:.3f}m\n")
-    log_file.write(f"ACTUAL ROTATION: {np.degrees(actual_rotation):.1f}°\n")
+    log_file.write(f"ROBOT ACTUAL MOVEMENT (ODOMETRY): [dx={actual_movement[0]:.3f}, dy={actual_movement[1]:.3f}, dtheta={np.degrees(actual_rotation):.1f}°]\n")
+    log_file.write(f"ROBOT ACTUAL DISTANCE: {actual_distance:.3f}m\n")
+    log_file.write(f"ROBOT ACTUAL ROTATION: {np.degrees(actual_rotation):.1f}°\n")
     
-    # Camera positions during test
-    log_file.write(f"CAMERA POSITIONS DURING TEST ({len(camera_positions)} samples):\n")
-    for i, pos in enumerate(camera_positions):
-        log_file.write(f"  Sample {i+1}: x={pos[0]:.3f}, y={pos[1]:.3f}, z={pos[2]:.3f}\n")
+    # Camera movement and rotation (SLAM)
+    if start_camera_data is not None and end_camera_data is not None:
+        start_pos = np.array(start_camera_data[:3])
+        end_pos = np.array(end_camera_data[:3])
+        camera_movement = end_pos - start_pos
+        camera_distance = np.linalg.norm(camera_movement[:2])  # Only x,y for 2D distance
+        
+        # Calculate camera rotation
+        start_quat = start_camera_data[3] if len(start_camera_data) > 3 else [1, 0, 0, 0]
+        end_quat = end_camera_data[3] if len(end_camera_data) > 3 else [1, 0, 0, 0]
+        start_euler = quaternion_to_euler_angles(start_quat)
+        end_euler = quaternion_to_euler_angles(end_quat)
+        
+        # Calculate rotation differences
+        roll_diff = end_euler[0] - start_euler[0]
+        pitch_diff = end_euler[1] - start_euler[1]
+        yaw_diff = end_euler[2] - start_euler[2]
+        
+        # Normalize angles to [-180, 180]
+        for diff in [roll_diff, pitch_diff, yaw_diff]:
+            while diff > 180:
+                diff -= 360
+            while diff < -180:
+                diff += 360
+        
+        log_file.write(f"CAMERA ACTUAL MOVEMENT (SLAM): [dx={camera_movement[0]:.3f}, dy={camera_movement[1]:.3f}, dz={camera_movement[2]:.3f}]\n")
+        log_file.write(f"CAMERA ACTUAL DISTANCE: {camera_distance:.3f}m\n")
+        log_file.write(f"CAMERA ACTUAL ROTATION (SLAM): [roll={roll_diff:+.1f}°, pitch={pitch_diff:+.1f}°, yaw={yaw_diff:+.1f}°]\n")
+        
+        # Compare robot vs camera movement
+        robot_2d_movement = actual_movement[:2]
+        camera_2d_movement = camera_movement[:2]
+        movement_diff = np.linalg.norm(robot_2d_movement - camera_2d_movement)
+        log_file.write(f"MOVEMENT DISCREPANCY (ROBOT vs CAMERA): {movement_diff:.3f}m\n")
+        
+        # Compare robot vs camera rotation
+        rotation_diff = abs(np.degrees(actual_rotation)) - abs(yaw_diff)  # Compare yaw rotations
+        log_file.write(f"ROTATION DISCREPANCY (ROBOT vs CAMERA): {rotation_diff:+.1f}°\n")
+    else:
+        log_file.write(f"CAMERA ACTUAL MOVEMENT (SLAM): Not available\n")
+        log_file.write(f"CAMERA ACTUAL ROTATION (SLAM): Not available\n")
+        log_file.write(f"MOVEMENT DISCREPANCY: Cannot calculate (no camera data)\n")
+        log_file.write(f"ROTATION DISCREPANCY: Cannot calculate (no camera data)\n")
     
     # Test result
     log_file.write(f"TEST RESULT: {'PASSED' if success else 'FAILED'}\n")
     log_file.write(f"{'='*60}\n")
     log_file.flush()  # Ensure it's written immediately
+
+
+def create_calib_results_folder():
+    """Create the calib-results folder and return the path."""
+    calib_dir = Path("calib-results")
+    calib_dir.mkdir(exist_ok=True)
+    return calib_dir
+
+
+
 
 
 def run_calibration_tests(robot_interface, slam_interface=None):
@@ -90,162 +202,80 @@ def run_calibration_tests(robot_interface, slam_interface=None):
         log_file.write(f"INITIAL ROBOT POSE: [x={initial_pose[0]:.3f}, y={initial_pose[1]:.3f}, theta={np.degrees(initial_pose[2]):.1f}°]\n")
         log_file.write(f"{'='*60}\n")
         
-        # Test 1: Move forward 1 meter
-        print("\n📋 Test 1: Moving FORWARD by 1.0 meter")
-        
-        # Get starting pose
-        start_obs = robot_interface.get_obs()
-        start_pose = np.array(start_obs["base_pose"])
-        camera_positions = []  # Will be populated if we have SLAM interface
-        
-        print("Starting movement with wheel odometry monitoring...")
-        success = robot_interface.move_forward(1.0)  # Use new move_forward method
-        
-        # Get ending pose
-        end_obs = robot_interface.get_obs()
-        end_pose = np.array(end_obs["base_pose"])
-        
-        if success:
-            print("✅ Test 1 PASSED: Robot moved forward successfully")
-            print(f"Final position: [x={end_pose[0]:.3f}, y={end_pose[1]:.3f}, theta={np.degrees(end_pose[2]):.1f}°]")
-        else:
-            print("❌ Test 1 FAILED: Robot failed to move forward")
-        
-        # Log test results
-        log_test_result(log_file, "Test 1: Move Forward 1.0m", [0.0, 1.0, 0.0], start_pose, end_pose, camera_positions, success)
-        
-        time.sleep(2)  # Wait 2 seconds between tests
-        
-        # Test 2: Move backward 1 meter
-        print("\n📋 Test 2: Moving BACKWARD by 1.0 meter")
-        
-        start_obs = robot_interface.get_obs()
-        start_pose = np.array(start_obs["base_pose"])
-        camera_positions = []
-        
-        print("Starting movement with wheel odometry monitoring...")
-        success = robot_interface.move_forward(-1.0)  # Use negative distance for backward
-        
-        end_obs = robot_interface.get_obs()
-        end_pose = np.array(end_obs["base_pose"])
-        
-        if success:
-            print("✅ Test 2 PASSED: Robot moved backward successfully")
-            print(f"Final position: x={end_pose[0]:.3f}, y={end_pose[1]:.3f}, theta={np.degrees(end_pose[2]):.1f}°]")
-        else:
-            print("❌ Test 2 FAILED: Robot failed to move backward")
-        
-        log_test_result(log_file, "Test 2: Move Backward 1.0m", [0.0, -1.0, 0.0], start_pose, end_pose, camera_positions, success)
-        
-        time.sleep(2)  # Wait 2 seconds between tests
-        
-        # Test 3: Rotate left 90 degrees
-        print("\n📋 Test 3: Rotating LEFT by 90 degrees")
-        
-        start_obs = robot_interface.get_obs()
-        start_pose = np.array(start_obs["base_pose"])
-        camera_positions = []
-        
-        print("Starting rotation with wheel odometry monitoring...")
-        success = robot_interface.rotate_in_place(np.radians(90))  # Use new rotate_in_place method
-        
-        end_obs = robot_interface.get_obs()
-        end_pose = np.array(end_obs["base_pose"])
-        
-        if success:
-            print("✅ Test 3 PASSED: Robot rotated left successfully")
-            print(f"Final position: x={end_pose[0]:.3f}, y={end_pose[1]:.3f}, theta={np.degrees(end_pose[2]):.1f}°]")
-        else:
-            print("❌ Test 3 FAILED: Robot failed to rotate left")
-        
-        log_test_result(log_file, "Test 3: Rotate Left 90°", [0.0, 0.0, np.radians(90)], start_pose, end_pose, camera_positions, success)
-        
-        time.sleep(2)  # Wait 2 seconds between tests
-        
-        # Test 4: Rotate right 90 degrees
-        print("\n📋 Test 4: Rotating RIGHT by 90 degrees")
-        
-        start_obs = robot_interface.get_obs()
-        start_pose = np.array(start_obs["base_pose"])
-        camera_positions = []
-        
-        print("Starting rotation with wheel odometry monitoring...")
-        success = robot_interface.rotate_in_place(np.radians(-90))  # Use negative angle for right rotation
-        
-        end_obs = robot_interface.get_obs()
-        end_pose = np.array(end_obs["base_pose"])
-        
-        if success:
-            print("✅ Test 4 PASSED: Robot rotated right successfully")
-            print(f"Final position: x={end_pose[0]:.3f}, y={end_pose[1]:.3f}, theta={np.degrees(end_pose[2]):.1f}°]")
-        else:
-            print("❌ Test 4 FAILED: Robot failed to rotate right")
-        
-        log_test_result(log_file, "Test 4: Rotate Right 90°", [0.0, 0.0, np.radians(-90)], start_pose, end_pose, camera_positions, success)
-        
-        time.sleep(2)  # Wait 2 seconds between tests
-        
-        # Test 5: Strafe left 1 meter
-        print("\n📋 Test 5: Strafing LEFT by 1.0 meter")
-        
-        start_obs = robot_interface.get_obs()
-        start_pose = np.array(start_obs["base_pose"])
-        camera_positions = []
-        
-        print("Starting strafe with wheel odometry monitoring...")
-        # For strafing, we need to use the original method but with proper target calculation
-        # Strafe left means move perpendicular to current heading
-        start_theta = start_pose[2]
-        strafe_x = 1.0 * np.cos(start_theta + np.pi/2)  # Perpendicular to heading
-        strafe_y = 1.0 * np.sin(start_theta + np.pi/2)
-        target_pose = np.array([start_pose[0] + strafe_x, start_pose[1] + strafe_y, start_pose[2]])
-        
-        success = robot_interface.move_to_base_waypoint(
-            [1.0, 0.0, 0.0],  # [y, x, theta] - strafe left
-            threshold_pos=0.01,
-            threshold_theta=0.01,
-            max_steps=100
-        )
-        
-        end_obs = robot_interface.get_obs()
-        end_pose = np.array(end_obs["base_pose"])
-        
-        if success:
-            print("✅ Test 5 PASSED: Robot strafed left successfully")
-            print(f"Final position: x={end_pose[0]:.3f}, y={end_pose[1]:.3f}, theta={np.degrees(end_pose[2]):.1f}°]")
-        else:
-            print("❌ Test 5 FAILED: Robot failed to strafe left")
-        
-        log_test_result(log_file, "Test 5: Strafe Left 1.0m", [1.0, 0.0, 0.0], start_pose, end_pose, camera_positions, success)
-        
-        time.sleep(2)  # Wait 2 seconds between tests
-        
-        # Test 6: Strafe right 1 meter
-        print("\n📋 Test 6: Strafing RIGHT by 1.0 meter")
-        
-        start_obs = robot_interface.get_obs()
-        start_pose = np.array(start_obs["base_pose"])
-        camera_positions = []
-        
-        print("Starting strafe with wheel odometry monitoring...")
-        success = robot_interface.move_to_base_waypoint(
-            [-1.0, 0.0, 0.0],  # [y, x, theta] - strafe right
-            threshold_pos=0.01,
-            threshold_theta=0.01,
-            max_steps=100
-        )
-        
-        end_obs = robot_interface.get_obs()
-        end_pose = np.array(end_obs["base_pose"])
-        
-        if success:
-            print("✅ Test 6 PASSED: Robot strafed right successfully")
-            print(f"Final position: x={end_pose[0]:.3f}, y={end_pose[1]:.3f}, theta={np.degrees(end_pose[2]):.1f}°]")
-        else:
-            print("❌ Test 6 FAILED: Robot failed to strafe right")
-        
-        log_test_result(log_file, "Test 6: Strafe Right 1.0m", [-1.0, 0.0, 0.0], start_pose, end_pose, camera_positions, success)
-        
+        # Helper to extract base pose from base.get_state()
+        def get_base_pose(base):
+            obs = base.get_state()
+            if isinstance(obs, dict) and 'base_pose' in obs:
+                return np.array(obs['base_pose'])
+            raise RuntimeError(f"base.get_state() did not return a dict with 'base_pose': got {obs}")
+
+        # Helper function for non-blocking movement/rotation
+        def move_base_to(target_pose, base, description):
+            print(f"\n➡️  Command: {description}")
+            while True:
+                base.execute_action({'base_pose': target_pose})  # <-- send every loop!
+                state = get_base_pose(base)
+                print(f"Current pose: x={state[0]:.3f}, y={state[1]:.3f}, theta={np.degrees(state[2]):.1f}°")
+                pos_error = np.linalg.norm(state[:2] - target_pose[:2])
+                theta_error = np.abs(np.arctan2(np.sin(target_pose[2] - state[2]), np.cos(target_pose[2] - state[2])))
+                if pos_error < 0.01 and theta_error < 0.01:
+                    print("Target reached!")
+                    break
+                time.sleep(0.1)
+
+        base = robot_interface.base if hasattr(robot_interface, 'base') else robot_interface
+
+        # OCTAGON TEST SEQUENCE
+        octagon_steps = 8
+        octagon_side = 0.5
+        octagon_angle = np.pi / 4  # 45 degrees in radians
+        for i in range(octagon_steps):
+            # Step 1: Move forward 0.5m
+            print(f"\n[TEST {2*i+1}/16] Octagon Step {i+1}: Move forward 0.5m")
+            start_pose = get_base_pose(base)
+            start_camera_pos = get_camera_position_from_slam()
+            target_x = start_pose[0] + octagon_side * np.cos(start_pose[2])
+            target_y = start_pose[1] + octagon_side * np.sin(start_pose[2])
+            target_theta = start_pose[2]
+            target_pose = np.array([target_x, target_y, target_theta])
+            move_base_to(target_pose, base, f"Octagon Step {i+1}: Move forward 0.5m")
+            end_pose = get_base_pose(base)
+            end_camera_pos = get_camera_position_from_slam()
+            log_test_result(
+                log_file,
+                f"Octagon Step {i+1}: Move Forward 0.5m",
+                [octagon_side, 0.0, 0.0],
+                start_pose,
+                end_pose,
+                start_camera_pos,
+                end_camera_pos,
+                True
+            )
+            time.sleep(2)
+
+            # Step 2: Turn left 45°
+            print(f"\n[TEST {2*i+2}/16] Octagon Step {i+1}: Turn left 45°")
+            start_pose = get_base_pose(base)
+            start_camera_pos = get_camera_position_from_slam()
+            target_x = start_pose[0]
+            target_y = start_pose[1]
+            target_theta = start_pose[2] + octagon_angle
+            target_pose = np.array([target_x, target_y, target_theta])
+            move_base_to(target_pose, base, f"Octagon Step {i+1}: Turn left 45°")
+            end_pose = get_base_pose(base)
+            end_camera_pos = get_camera_position_from_slam()
+            log_test_result(
+                log_file,
+                f"Octagon Step {i+1}: Turn Left 45°",
+                [0.0, 0.0, octagon_angle],
+                start_pose,
+                end_pose,
+                start_camera_pos,
+                end_camera_pos,
+                True
+            )
+            time.sleep(2)
+
         # Final summary
         final_obs = robot_interface.get_obs()
         final_pose = np.array(final_obs["base_pose"])

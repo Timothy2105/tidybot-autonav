@@ -4,6 +4,7 @@ follow-traj/
 saved-states/
 videos/
 calib-results/
+camera_position.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
