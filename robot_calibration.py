@@ -82,82 +82,68 @@ def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, 
     # Target movement
     log_file.write(f"TARGET MOVEMENT: [y={target_movement[0]:.3f}, x={target_movement[1]:.3f}, theta={np.degrees(target_movement[2]):.1f}°]\n")
     
-    # Robot poses (odometry)
-    log_file.write(f"ROBOT START POSE (ODOMETRY): [x={start_pose[0]:.3f}, y={start_pose[1]:.3f}, theta={np.degrees(start_pose[2]):.1f}°]\n")
-    log_file.write(f"ROBOT END POSE (ODOMETRY): [x={end_pose[0]:.3f}, y={end_pose[1]:.3f}, theta={np.degrees(end_pose[2]):.1f}°]\n")
+    # Calculated wheel (robot odometry) start and end pose
+    log_file.write(f"WHEEL ODOMETRY START POSE: [x={start_pose[0]:.3f}, y={start_pose[1]:.3f}, theta={np.degrees(start_pose[2]):.1f}°]\n")
+    log_file.write(f"WHEEL ODOMETRY END POSE:   [x={end_pose[0]:.3f}, y={end_pose[1]:.3f}, theta={np.degrees(end_pose[2]):.1f}°]\n")
     
-    # Camera positions and orientations (SLAM)
+    # Calculated wheel diff
+    actual_movement = end_pose - start_pose
+    actual_distance = np.linalg.norm(actual_movement[:2])
+    actual_rotation = actual_movement[2]
+    log_file.write(f"WHEEL ODOMETRY DIFF: [dx={actual_movement[0]:.3f}, dy={actual_movement[1]:.3f}, dtheta={np.degrees(actual_rotation):.1f}°]\n")
+    log_file.write(f"WHEEL ODOMETRY DISTANCE: {actual_distance:.3f}m\n")
+    log_file.write(f"WHEEL ODOMETRY ROTATION: {np.degrees(actual_rotation):.1f}°\n")
+    
+    log_file.write("\n")
+    
+    # Camera estimated start and end position + orientation (SLAM)
     if start_camera_data is not None:
         start_pos = start_camera_data[:3]
         start_quat = start_camera_data[3] if len(start_camera_data) > 3 else [1, 0, 0, 0]
         start_euler = quaternion_to_euler_angles(start_quat)
-        log_file.write(f"CAMERA START POSITION (SLAM): [x={start_pos[0]:.3f}, y={start_pos[1]:.3f}, z={start_pos[2]:.3f}]\n")
-        log_file.write(f"CAMERA START ORIENTATION (SLAM): [roll={start_euler[0]:.1f}°, pitch={start_euler[1]:.1f}°, yaw={start_euler[2]:.1f}°]\n")
+        log_file.write(f"CAMERA ESTIMATED START POSITION (SLAM): [x={start_pos[0]:.3f}, y={start_pos[1]:.3f}, z={start_pos[2]:.3f}]\n")
+        log_file.write(f"CAMERA ESTIMATED START ORIENTATION (SLAM): [roll={start_euler[0]:.1f}°, pitch={start_euler[1]:.1f}°, yaw={start_euler[2]:.1f}°]\n")
     else:
-        log_file.write(f"CAMERA START POSITION (SLAM): Not available\n")
-        log_file.write(f"CAMERA START ORIENTATION (SLAM): Not available\n")
+        log_file.write(f"CAMERA ESTIMATED START POSITION (SLAM): Not available\n")
+        log_file.write(f"CAMERA ESTIMATED START ORIENTATION (SLAM): Not available\n")
     
     if end_camera_data is not None:
         end_pos = end_camera_data[:3]
         end_quat = end_camera_data[3] if len(end_camera_data) > 3 else [1, 0, 0, 0]
         end_euler = quaternion_to_euler_angles(end_quat)
-        log_file.write(f"CAMERA END POSITION (SLAM): [x={end_pos[0]:.3f}, y={end_pos[1]:.3f}, z={end_pos[2]:.3f}]\n")
-        log_file.write(f"CAMERA END ORIENTATION (SLAM): [roll={end_euler[0]:.1f}°, pitch={end_euler[1]:.1f}°, yaw={end_euler[2]:.1f}°]\n")
+        log_file.write(f"CAMERA ESTIMATED END POSITION (SLAM):   [x={end_pos[0]:.3f}, y={end_pos[1]:.3f}, z={end_pos[2]:.3f}]\n")
+        log_file.write(f"CAMERA ESTIMATED END ORIENTATION (SLAM):   [roll={end_euler[0]:.1f}°, pitch={end_euler[1]:.1f}°, yaw={end_euler[2]:.1f}°]\n")
     else:
-        log_file.write(f"CAMERA END POSITION (SLAM): Not available\n")
-        log_file.write(f"CAMERA END ORIENTATION (SLAM): Not available\n")
+        log_file.write(f"CAMERA ESTIMATED END POSITION (SLAM): Not available\n")
+        log_file.write(f"CAMERA ESTIMATED END ORIENTATION (SLAM): Not available\n")
     
-    # Actual movement (robot odometry)
-    actual_movement = end_pose - start_pose
-    actual_distance = np.linalg.norm(actual_movement[:2])
-    actual_rotation = actual_movement[2]
-    log_file.write(f"ROBOT ACTUAL MOVEMENT (ODOMETRY): [dx={actual_movement[0]:.3f}, dy={actual_movement[1]:.3f}, dtheta={np.degrees(actual_rotation):.1f}°]\n")
-    log_file.write(f"ROBOT ACTUAL DISTANCE: {actual_distance:.3f}m\n")
-    log_file.write(f"ROBOT ACTUAL ROTATION: {np.degrees(actual_rotation):.1f}°\n")
-    
-    # Camera movement and rotation (SLAM)
+    # Calculated camera diffs
     if start_camera_data is not None and end_camera_data is not None:
         start_pos = np.array(start_camera_data[:3])
         end_pos = np.array(end_camera_data[:3])
         camera_movement = end_pos - start_pos
-        camera_distance = np.linalg.norm(camera_movement[:2])  # Only x,y for 2D distance
-        
-        # Calculate camera rotation
+        camera_distance = np.linalg.norm(camera_movement[:2])
         start_quat = start_camera_data[3] if len(start_camera_data) > 3 else [1, 0, 0, 0]
         end_quat = end_camera_data[3] if len(end_camera_data) > 3 else [1, 0, 0, 0]
         start_euler = quaternion_to_euler_angles(start_quat)
         end_euler = quaternion_to_euler_angles(end_quat)
-        
-        # Calculate rotation differences
         roll_diff = end_euler[0] - start_euler[0]
         pitch_diff = end_euler[1] - start_euler[1]
         yaw_diff = end_euler[2] - start_euler[2]
-        
         # Normalize angles to [-180, 180]
         for diff in [roll_diff, pitch_diff, yaw_diff]:
             while diff > 180:
                 diff -= 360
             while diff < -180:
                 diff += 360
-        
-        log_file.write(f"CAMERA ACTUAL MOVEMENT (SLAM): [dx={camera_movement[0]:.3f}, dy={camera_movement[1]:.3f}, dz={camera_movement[2]:.3f}]\n")
-        log_file.write(f"CAMERA ACTUAL DISTANCE: {camera_distance:.3f}m\n")
-        log_file.write(f"CAMERA ACTUAL ROTATION (SLAM): [roll={roll_diff:+.1f}°, pitch={pitch_diff:+.1f}°, yaw={yaw_diff:+.1f}°]\n")
-        
-        # Compare robot vs camera movement
-        robot_2d_movement = actual_movement[:2]
-        camera_2d_movement = camera_movement[:2]
-        movement_diff = np.linalg.norm(robot_2d_movement - camera_2d_movement)
-        log_file.write(f"MOVEMENT DISCREPANCY (ROBOT vs CAMERA): {movement_diff:.3f}m\n")
-        
-        # Compare robot vs camera rotation
-        rotation_diff = abs(np.degrees(actual_rotation)) - abs(yaw_diff)  # Compare yaw rotations
-        log_file.write(f"ROTATION DISCREPANCY (ROBOT vs CAMERA): {rotation_diff:+.1f}°\n")
+        log_file.write(f"CAMERA ESTIMATED DIFF: [dx={camera_movement[0]:.3f}, dy={camera_movement[1]:.3f}, dz={camera_movement[2]:.3f}]\n")
+        log_file.write(f"CAMERA ESTIMATED DISTANCE: {camera_distance:.3f}m\n")
+        log_file.write(f"CAMERA ESTIMATED ROTATION DIFF: [roll={roll_diff:+.1f}°, pitch={pitch_diff:+.1f}°, yaw={yaw_diff:+.1f}°]\n")
     else:
-        log_file.write(f"CAMERA ACTUAL MOVEMENT (SLAM): Not available\n")
-        log_file.write(f"CAMERA ACTUAL ROTATION (SLAM): Not available\n")
-        log_file.write(f"MOVEMENT DISCREPANCY: Cannot calculate (no camera data)\n")
-        log_file.write(f"ROTATION DISCREPANCY: Cannot calculate (no camera data)\n")
+        log_file.write(f"CAMERA ESTIMATED DIFF: Not available\n")
+        log_file.write(f"CAMERA ESTIMATED ROTATION DIFF: Not available\n")
+    
+    log_file.write("\n")
     
     # Test result
     log_file.write(f"TEST RESULT: {'PASSED' if success else 'FAILED'}\n")
@@ -227,7 +213,7 @@ def run_calibration_tests(robot_interface, slam_interface=None):
 
         # OCTAGON TEST SEQUENCE
         octagon_steps = 8
-        octagon_side = 0.5
+        octagon_side = 0.3
         octagon_angle = np.pi / 4  # 45 degrees in radians
         for i in range(octagon_steps):
             # Step 1: Move forward 0.5m
@@ -243,7 +229,7 @@ def run_calibration_tests(robot_interface, slam_interface=None):
             end_camera_pos = get_camera_position_from_slam()
             log_test_result(
                 log_file,
-                f"Octagon Step {i+1}: Move Forward 0.5m",
+                f"Octagon Step {i+1}: Move Forward {octagon_side}m",
                 [octagon_side, 0.0, 0.0],
                 start_pose,
                 end_pose,
