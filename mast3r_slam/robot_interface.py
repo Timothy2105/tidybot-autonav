@@ -128,7 +128,7 @@ class RobotInterface:
             except Exception as e:
                 print(f"Error executing robot action: {e}")
     
-    def rotate_in_place(self, target_angle_rad, threshold_theta=0.01, max_steps=100):
+    def rotate_in_place(self, target_angle_rad, threshold_theta=0.005, max_steps=100):
         """
         Rotate the robot in place without moving position.
         
@@ -264,7 +264,7 @@ class RobotInterface:
         print(f"Failed to reach target position after {max_steps} steps")
         return False
 
-    def move_to_base_waypoint(self, target_base_pose, threshold_pos=0.01, threshold_theta=0.01, max_steps=100):
+    def move_to_base_waypoint(self, target_base_pose, threshold_pos=0.01, threshold_theta=0.005, max_steps=100):
         """
         Smoothly move the robot base to a target [y, x, theta] pose via interpolation.
         Uses get_obs() to monitor position during movement (similar to common_real_env.py).

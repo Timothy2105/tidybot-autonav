@@ -568,7 +568,7 @@ if __name__ == "__main__":
     
     # Initialize robot interface if sending commands or in calibration mode
     robot_interface = None
-    if args.send_cmd or args.calib_robot:
+    if args.send_cmd:
         simulate = args.simulate_robot
         robot_interface = RobotInterface(simulate=simulate)
         print(f"Robot interface initialized (simulate={simulate})")

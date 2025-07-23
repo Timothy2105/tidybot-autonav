@@ -204,56 +204,34 @@ def run_calibration_tests(robot_interface, slam_interface=None):
                 print(f"Current pose: x={state[0]:.3f}, y={state[1]:.3f}, theta={np.degrees(state[2]):.1f}°")
                 pos_error = np.linalg.norm(state[:2] - target_pose[:2])
                 theta_error = np.abs(np.arctan2(np.sin(target_pose[2] - state[2]), np.cos(target_pose[2] - state[2])))
-                if pos_error < 0.01 and theta_error < 0.01:
+                if pos_error < 0.01 and theta_error < 0.005:
                     print("Target reached!")
                     break
                 time.sleep(0.1)
 
         base = robot_interface.base if hasattr(robot_interface, 'base') else robot_interface
 
-        # OCTAGON TEST SEQUENCE
-        octagon_steps = 8
-        octagon_side = 0.3
-        octagon_angle = np.pi / 4  # 45 degrees in radians
-        for i in range(octagon_steps):
-            # Step 1: Move forward 0.5m
-            print(f"\n[TEST {2*i+1}/16] Octagon Step {i+1}: Move forward 0.5m")
+        # 16-SIDED POLYGON TEST SEQUENCE
+        num_sides = 16
+        side_length = 4.71 / num_sides  # ≈ 0.294375m
+        turn_angle = 2 * np.pi / num_sides  # 22.5° in radians
+        for i in range(num_sides):
+            print(f"\n[TEST {i+1}/{num_sides}] 16-gon Step {i+1}: Move forward and rotate {np.degrees(turn_angle):.1f}°")
             start_pose = get_base_pose(base)
             start_camera_pos = get_camera_position_from_slam()
-            target_x = start_pose[0] + octagon_side * np.cos(start_pose[2])
-            target_y = start_pose[1] + octagon_side * np.sin(start_pose[2])
-            target_theta = start_pose[2]
+            # Calculate target pose: move forward along current heading, rotate at the same time
+            target_x = start_pose[0] + side_length * np.cos(start_pose[2])
+            target_y = start_pose[1] + side_length * np.sin(start_pose[2])
+            target_theta = start_pose[2] + turn_angle
             target_pose = np.array([target_x, target_y, target_theta])
-            move_base_to(target_pose, base, f"Octagon Step {i+1}: Move forward 0.5m")
+            # Send as a single move+rotate command
+            move_base_to(target_pose, base, f"16-gon Step {i+1}: Move {side_length:.3f}m and rotate {np.degrees(turn_angle):.1f}°")
             end_pose = get_base_pose(base)
             end_camera_pos = get_camera_position_from_slam()
             log_test_result(
                 log_file,
-                f"Octagon Step {i+1}: Move Forward {octagon_side}m",
-                [octagon_side, 0.0, 0.0],
-                start_pose,
-                end_pose,
-                start_camera_pos,
-                end_camera_pos,
-                True
-            )
-            time.sleep(2)
-
-            # Step 2: Turn left 45°
-            print(f"\n[TEST {2*i+2}/16] Octagon Step {i+1}: Turn left 45°")
-            start_pose = get_base_pose(base)
-            start_camera_pos = get_camera_position_from_slam()
-            target_x = start_pose[0]
-            target_y = start_pose[1]
-            target_theta = start_pose[2] + octagon_angle
-            target_pose = np.array([target_x, target_y, target_theta])
-            move_base_to(target_pose, base, f"Octagon Step {i+1}: Turn left 45°")
-            end_pose = get_base_pose(base)
-            end_camera_pos = get_camera_position_from_slam()
-            log_test_result(
-                log_file,
-                f"Octagon Step {i+1}: Turn Left 45°",
-                [0.0, 0.0, octagon_angle],
+                f"16-gon Step {i+1}: Move {side_length:.3f}m + Rotate {np.degrees(turn_angle):.1f}°",
+                [side_length, 0.0, turn_angle],
                 start_pose,
                 end_pose,
                 start_camera_pos,
