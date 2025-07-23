@@ -132,7 +132,7 @@ class SharedStates:
         self.paused = manager.Value("i", 0)
         self.mode = manager.Value("i", Mode.INIT)
         self.reloc_sem = manager.Value("i", 0)
-        self.relocalized = manager.Value("i", 0)  # Flag to track if relocalization was successful
+        self.relocalized = manager.Value("i", 0)  # track if reloc
         self.global_optimizer_tasks = manager.list()
         self.edges_ii = manager.list()
         self.edges_jj = manager.list()
@@ -156,8 +156,8 @@ class SharedStates:
 
         self.save_state_flag = manager.Value("i", 0)
         self.save_info = manager.dict({'should_save': False, 'save_dir': '', 'timestamps': []})
-        self.target_keyframe_idx = manager.Value("i", -1)  # Index of target keyframe for visualization (-1 = none)
-        self.show_target_keyframe = manager.Value("i", 0)  # Boolean flag to show target keyframe in blue
+        self.target_keyframe_idx = manager.Value("i", -1)  # idx of target kf
+        self.show_target_keyframe = manager.Value("i", 0)  # show target kf in blue
 
     def set_frame(self, frame):
         with self.lock:

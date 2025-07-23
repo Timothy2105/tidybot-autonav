@@ -157,8 +157,7 @@ class Window(WindowEvents):
                 self.kf_img_np = keyframe.uimg.numpy()
                 self.kf_img.write(self.kf_img_np)
 
-            # All keyframes are red (target keyframe is saved as image instead)
-            color = [1, 0, 0, 1]  # Red for all keyframes
+            color = [1, 0, 0, 1]  # red for kf
                 
             if self.show_keyframe:
                 self.frustums.add(
