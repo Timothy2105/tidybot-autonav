@@ -36,30 +36,6 @@ def get_camera_position_from_slam():
     return None
 
 
-def quaternion_to_euler_angles(q):
-    """Convert quaternion to Euler angles (roll, pitch, yaw) in degrees"""
-    w, x, y, z = q
-    
-    # Roll (x-axis rotation)
-    sinr_cosp = 2 * (w * x + y * z)
-    cosr_cosp = 1 - 2 * (x * x + y * y)
-    roll = np.arctan2(sinr_cosp, cosr_cosp)
-    
-    # Pitch (y-axis rotation)
-    sinp = 2 * (w * y - z * x)
-    if abs(sinp) >= 1:
-        pitch = np.copysign(np.pi / 2, sinp)  # use 90 degrees if out of range
-    else:
-        pitch = np.arcsin(sinp)
-    
-    # Yaw (z-axis rotation)
-    siny_cosp = 2 * (w * z + x * y)
-    cosy_cosp = 1 - 2 * (y * y + z * z)
-    yaw = np.arctan2(siny_cosp, cosy_cosp)
-    
-    return np.array([np.degrees(roll), np.degrees(pitch), np.degrees(yaw)])
-
-
 def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, start_camera_data, end_camera_data, success):
     """
     Log test results to the calibration file.
@@ -100,9 +76,8 @@ def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, 
     if start_camera_data is not None:
         start_pos = start_camera_data[:3]
         start_quat = start_camera_data[3] if len(start_camera_data) > 3 else [1, 0, 0, 0]
-        start_euler = quaternion_to_euler_angles(start_quat)
         log_file.write(f"CAMERA ESTIMATED START POSITION (SLAM): [x={start_pos[0]:.3f}, y={start_pos[1]:.3f}, z={start_pos[2]:.3f}]\n")
-        log_file.write(f"CAMERA ESTIMATED START ORIENTATION (SLAM): [roll={start_euler[0]:.1f}°, pitch={start_euler[1]:.1f}°, yaw={start_euler[2]:.1f}°]\n")
+        log_file.write(f"CAMERA ESTIMATED START ORIENTATION (SLAM) (quaternion): [w={start_quat[0]:.6f}, x={start_quat[1]:.6f}, y={start_quat[2]:.6f}, z={start_quat[3]:.6f}]\n")
     else:
         log_file.write(f"CAMERA ESTIMATED START POSITION (SLAM): Not available\n")
         log_file.write(f"CAMERA ESTIMATED START ORIENTATION (SLAM): Not available\n")
@@ -110,9 +85,8 @@ def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, 
     if end_camera_data is not None:
         end_pos = end_camera_data[:3]
         end_quat = end_camera_data[3] if len(end_camera_data) > 3 else [1, 0, 0, 0]
-        end_euler = quaternion_to_euler_angles(end_quat)
         log_file.write(f"CAMERA ESTIMATED END POSITION (SLAM):   [x={end_pos[0]:.3f}, y={end_pos[1]:.3f}, z={end_pos[2]:.3f}]\n")
-        log_file.write(f"CAMERA ESTIMATED END ORIENTATION (SLAM):   [roll={end_euler[0]:.1f}°, pitch={end_euler[1]:.1f}°, yaw={end_euler[2]:.1f}°]\n")
+        log_file.write(f"CAMERA ESTIMATED END ORIENTATION (SLAM) (quaternion):   [w={end_quat[0]:.6f}, x={end_quat[1]:.6f}, y={end_quat[2]:.6f}, z={end_quat[3]:.6f}]\n")
     else:
         log_file.write(f"CAMERA ESTIMATED END POSITION (SLAM): Not available\n")
         log_file.write(f"CAMERA ESTIMATED END ORIENTATION (SLAM): Not available\n")
@@ -125,20 +99,11 @@ def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, 
         camera_distance = np.linalg.norm(camera_movement[:2])
         start_quat = start_camera_data[3] if len(start_camera_data) > 3 else [1, 0, 0, 0]
         end_quat = end_camera_data[3] if len(end_camera_data) > 3 else [1, 0, 0, 0]
-        start_euler = quaternion_to_euler_angles(start_quat)
-        end_euler = quaternion_to_euler_angles(end_quat)
-        roll_diff = end_euler[0] - start_euler[0]
-        pitch_diff = end_euler[1] - start_euler[1]
-        yaw_diff = end_euler[2] - start_euler[2]
-        # Normalize angles to [-180, 180]
-        for diff in [roll_diff, pitch_diff, yaw_diff]:
-            while diff > 180:
-                diff -= 360
-            while diff < -180:
-                diff += 360
         log_file.write(f"CAMERA ESTIMATED DIFF: [dx={camera_movement[0]:.3f}, dy={camera_movement[1]:.3f}, dz={camera_movement[2]:.3f}]\n")
         log_file.write(f"CAMERA ESTIMATED DISTANCE: {camera_distance:.3f}m\n")
-        log_file.write(f"CAMERA ESTIMATED ROTATION DIFF: [roll={roll_diff:+.1f}°, pitch={pitch_diff:+.1f}°, yaw={yaw_diff:+.1f}°]\n")
+        quat_diff = np.array(end_quat) - np.array(start_quat)
+        quat_diff_norm = np.linalg.norm(quat_diff)
+        log_file.write(f"CAMERA ESTIMATED QUATERNION DIFF NORM: {quat_diff_norm:.6f}\n")
     else:
         log_file.write(f"CAMERA ESTIMATED DIFF: Not available\n")
         log_file.write(f"CAMERA ESTIMATED ROTATION DIFF: Not available\n")
@@ -156,9 +121,6 @@ def create_calib_results_folder():
     calib_dir = Path("calib-results")
     calib_dir.mkdir(exist_ok=True)
     return calib_dir
-
-
-
 
 
 def run_calibration_tests(robot_interface, slam_interface=None):

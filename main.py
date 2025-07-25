@@ -26,6 +26,7 @@ from mast3r_slam.tracker import FrameTracker
 from mast3r_slam.visualization import WindowMsg, run_visualization
 from mast3r_slam.robot_interface import RobotInterface
 import torch.multiprocessing as mp
+import os
 
 
 def find_nearest_keyframe(current_pose, trajectory_data, keyframes, original_kf_count=None):
@@ -324,6 +325,8 @@ if __name__ == "__main__":
                        help="Simulate robot commands instead of sending to real robot for testing")
     parser.add_argument("--calib-robot", action="store_true",
                        help="Enable robot calibration mode: test basic movement commands")
+    parser.add_argument("--load-preds", action="store_true",
+                       help="Load prediction data and enable prediction visualization")
 
     args = parser.parse_args()
     
@@ -381,7 +384,7 @@ if __name__ == "__main__":
     if not args.no_viz:
         viz = mp.Process(
             target=run_visualization,
-            args=(config, states, keyframes, main2viz, viz2main),
+            args=(config, states, keyframes, main2viz, viz2main, args.load_preds),
         )
         viz.start()
 
@@ -572,6 +575,35 @@ if __name__ == "__main__":
         simulate = args.simulate_robot
         robot_interface = RobotInterface(simulate=simulate)
         print(f"Robot interface initialized (simulate={simulate})")
+
+    # Load prediction data if requested
+    if args.load_preds:
+        print("Loading prediction data...")
+        try:
+            import numpy as np
+            pred_file = "calib-results/kf-preds/predicted_wheel_poses.npz"
+            gt_file = "calib-results/kf-preds/ground_truth_camera_poses.npz"
+            
+            if os.path.exists(pred_file) and os.path.exists(gt_file):
+                # Load the prediction data
+                pred_data = np.load(pred_file)
+                gt_data = np.load(gt_file)
+                
+                print(f"Loaded {len(pred_data['positions'])} prediction poses")
+                
+                # For now, we'll assume the first 4 keyframes correspond to the predictions
+                # In a real scenario, you'd need to map keyframes to predictions based on timestamps or other criteria
+                prediction_kf_indices = list(range(min(4, len(keyframes))))
+                
+                # Set the prediction keyframe indices in the shared state
+                with states.lock:
+                    states.prediction_keyframe_indices[:] = prediction_kf_indices
+                
+                print(f"Set prediction keyframe indices: {prediction_kf_indices}")
+            else:
+                print(f"Warning: Prediction files not found: {pred_file}, {gt_file}")
+        except Exception as e:
+            print(f"Error loading prediction data: {e}")
 
     # Remove the immediate calibration block here
     # Calibration will be triggered after relocalization in the main loop

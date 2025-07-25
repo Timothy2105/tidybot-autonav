@@ -1,13 +1,14 @@
 import dataclasses
 import weakref
 from pathlib import Path
+import numpy as np
+import os
 
 import imgui
 import lietorch
 import torch
 import moderngl
 import moderngl_window as mglw
-import numpy as np
 from in3d.camera import Camera, ProjectionMatrix, lookat
 from in3d.pose_utils import translation_matrix
 from in3d.color import hex2rgba
@@ -95,6 +96,174 @@ class Window(WindowEvents):
         self.main2viz = main2viz
         self.viz2main = viz2main
 
+        # Load predicted poses if available
+        self.predicted_poses = self.load_predicted_poses()
+        self.show_predicted_poses = True
+        self.show_ground_truth_poses = True
+        self.load_preds_enabled = False  # Will be set by main.py if --load-preds is used
+        self.selected_keyframe_idx = 0  # Which keyframe to visualize (0-3)
+        self.debug_printed = False  # Flag to only print debug info once
+
+    def load_predicted_poses(self):
+        """Load predicted poses from the saved files"""
+        predicted_poses = []
+        
+        # Try to load from the text files directly
+        pred_file = "calib-results/kf-preds/predicted_wheel_poses.txt"
+        gt_file = "calib-results/kf-preds/ground_truth_camera_poses_all.txt"  # All 16 poses
+        gt_wheel_file = "calib-results/kf-preds/ground_truth_wheel_poses.txt"
+        gt_transposed_wheel_file = "calib-results/kf-preds/ground_truth_transposed_wheel_poses.txt"
+        
+        if os.path.exists(pred_file) and os.path.exists(gt_file) and os.path.exists(gt_wheel_file):
+            try:
+                # Parse predicted poses from text file
+                pred_positions = []
+                pred_quaternions = []
+                
+                with open(pred_file, 'r') as f:
+                    content = f.read()
+                    import re
+                    # Extract positions and quaternions using regex
+                    pos_matches = re.findall(r"Position:\s+\[([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]", content)
+                    quat_matches = re.findall(r"Quaternion:\s+\[w=([-\d.]+),\s*x=([-\d.]+),\s*y=([-\d.]+),\s*z=([-\d.]+)\]", content)
+                    
+                    for pos_match, quat_match in zip(pos_matches, quat_matches):
+                        pos = [float(x) for x in pos_match]
+                        quat = [float(x) for x in quat_match]
+                        pred_positions.append(pos)
+                        pred_quaternions.append(quat)
+                
+                # Parse ground truth poses from text file
+                gt_positions = []
+                gt_quaternions = []
+                
+                with open(gt_file, 'r') as f:
+                    content = f.read()
+                    # Extract positions and quaternions using regex
+                    pos_matches = re.findall(r"Position:\s+\[([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]", content)
+                    quat_matches = re.findall(r"Quaternion:\s+\[w=([-\d.]+),\s*x=([-\d.]+),\s*y=([-\d.]+),\s*z=([-\d.]+)\]", content)
+                    
+                    for pos_match, quat_match in zip(pos_matches, quat_matches):
+                        pos = [float(x) for x in pos_match]
+                        quat = [float(x) for x in quat_match]
+                        gt_positions.append(pos)
+                        gt_quaternions.append(quat)
+                
+                # Parse ground truth wheel poses from text file
+                gt_wheel_positions = []
+                gt_wheel_quaternions = []
+                
+                with open(gt_wheel_file, 'r') as f:
+                    content = f.read()
+                    # Extract positions and quaternions using regex
+                    pos_matches = re.findall(r"Position:\s+\[([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]", content)
+                    quat_matches = re.findall(r"Quaternion:\s+\[w=([-\d.]+),\s*x=([-\d.]+),\s*y=([-\d.]+),\s*z=([-\d.]+)\]", content)
+                    
+                    for pos_match, quat_match in zip(pos_matches, quat_matches):
+                        pos = [float(x) for x in pos_match]
+                        quat = [float(x) for x in quat_match]
+                        gt_wheel_positions.append(pos)
+                        gt_wheel_quaternions.append(quat)
+                
+                # Parse transposed ground truth wheel poses from text file
+                gt_transposed_wheel_positions = []
+                gt_transposed_wheel_quaternions = []
+                
+                if os.path.exists(gt_transposed_wheel_file):
+                    with open(gt_transposed_wheel_file, 'r') as f:
+                        content = f.read()
+                        # Extract positions and quaternions using regex
+                        pos_matches = re.findall(r"Position:\s+\[([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\]", content)
+                        quat_matches = re.findall(r"Quaternion:\s+\[w=([-\d.]+),\s*x=([-\d.]+),\s*y=([-\d.]+),\s*z=([-\d.]+)\]", content)
+                        
+                        for pos_match, quat_match in zip(pos_matches, quat_matches):
+                            pos = [float(x) for x in pos_match]
+                            quat = [float(x) for x in quat_match]
+                            gt_transposed_wheel_positions.append(pos)
+                            gt_transposed_wheel_quaternions.append(quat)
+                
+                # Store the loaded data as instance variables
+                self.gt_positions = gt_positions
+                self.gt_quaternions = gt_quaternions
+                self.pred_positions = pred_positions
+                self.pred_quaternions = pred_quaternions
+                self.gt_wheel_positions = gt_wheel_positions
+                self.gt_wheel_quaternions = gt_wheel_quaternions
+                self.gt_transposed_wheel_positions = gt_transposed_wheel_positions
+                self.gt_transposed_wheel_quaternions = gt_transposed_wheel_quaternions
+                
+                print(f"Loaded {len(pred_positions)} predicted poses, {len(gt_positions)} ground truth camera poses (all 16), {len(gt_wheel_positions)} ground truth wheel poses, and {len(gt_transposed_wheel_positions)} transposed wheel poses from text files")
+                
+                # Convert to Sim3 format for visualization
+                N = max(len(pred_positions), len(gt_positions), len(gt_wheel_positions), len(gt_transposed_wheel_positions))
+                for i in range(N):
+                    # Use available data or fill with zeros if missing
+                    if i < len(pred_positions):
+                        pred_pos = pred_positions[i]
+                        pred_quat = pred_quaternions[i]
+                    else:
+                        pred_pos = [0, 0, 0]
+                        pred_quat = [1, 0, 0, 0]
+                    if i < len(gt_positions):
+                        gt_pos = gt_positions[i]
+                        gt_quat = gt_quaternions[i]
+                    else:
+                        gt_pos = [0, 0, 0]
+                        gt_quat = [1, 0, 0, 0]
+                    if i < len(gt_wheel_positions):
+                        gt_wheel_pos = gt_wheel_positions[i]
+                        gt_wheel_quat = gt_wheel_quaternions[i]
+                    else:
+                        gt_wheel_pos = [0, 0, 0]
+                        gt_wheel_quat = [1, 0, 0, 0]
+                    if i < len(gt_transposed_wheel_positions):
+                        gt_transposed_wheel_pos = gt_transposed_wheel_positions[i]
+                        gt_transposed_wheel_quat = gt_transposed_wheel_quaternions[i]
+                    else:
+                        gt_transposed_wheel_pos = [0, 0, 0]
+                        gt_transposed_wheel_quat = [1, 0, 0, 0]
+
+                    # Create Sim3 transformation for predicted wheel pose
+                    pred_sim3_data = np.zeros(8, dtype=np.float32)
+                    pred_sim3_data[:3] = pred_pos  # translation (xyz)
+                    pred_sim3_data[3:7] = pred_quat  # quaternion (wxyz)
+                    pred_sim3_data[7] = 1.0  # scale
+                    
+                    # Create Sim3 transformation for ground truth camera pose
+                    gt_sim3_data = np.zeros(8, dtype=np.float32)
+                    gt_sim3_data[:3] = gt_pos  # translation (xyz)
+                    gt_sim3_data[3:7] = gt_quat  # quaternion (wxyz)
+                    gt_sim3_data[7] = 1.0  # scale
+                    
+                    # Create Sim3 transformation for ground truth wheel pose
+                    gt_wheel_sim3_data = np.zeros(8, dtype=np.float32)
+                    gt_wheel_sim3_data[:3] = gt_wheel_pos  # translation (xyz)
+                    gt_wheel_sim3_data[3:7] = gt_wheel_quat  # quaternion (wxyz)
+                    gt_wheel_sim3_data[7] = 1.0  # scale
+                    
+                    # Create Sim3 transformation for transposed ground truth wheel pose
+                    gt_transposed_wheel_sim3_data = np.zeros(8, dtype=np.float32)
+                    gt_transposed_wheel_sim3_data[:3] = gt_transposed_wheel_pos  # translation (xyz)
+                    gt_transposed_wheel_sim3_data[3:7] = gt_transposed_wheel_quat  # quaternion (wxyz)
+                    gt_transposed_wheel_sim3_data[7] = 1.0  # scale
+
+                    predicted_poses.append({
+                        'predicted': lietorch.Sim3(torch.from_numpy(pred_sim3_data).unsqueeze(0).float()),
+                        'ground_truth': lietorch.Sim3(torch.from_numpy(gt_sim3_data).unsqueeze(0).float()),
+                        'ground_truth_wheel': lietorch.Sim3(torch.from_numpy(gt_wheel_sim3_data).unsqueeze(0).float()),
+                        'ground_truth_transposed_wheel': lietorch.Sim3(torch.from_numpy(gt_transposed_wheel_sim3_data).unsqueeze(0).float())
+                    })
+                
+                print(f"Successfully loaded {len(predicted_poses)} predicted wheel poses, ground truth camera poses, and ground truth wheel poses for visualization")
+                return predicted_poses
+                
+            except Exception as e:
+                print(f"Error loading predicted poses: {e}")
+                return []
+        else:
+            print(f"Predicted pose files not found: {pred_file}, {gt_file}")
+            return []
+
     def render(self, t: float, frametime: float):
         self.viewport.use()
         self.ctx.enable(moderngl.DEPTH_TEST)
@@ -157,7 +326,14 @@ class Window(WindowEvents):
                 self.kf_img_np = keyframe.uimg.numpy()
                 self.kf_img.write(self.kf_img_np)
 
-            color = [1, 0, 0, 1]  # red for kf
+            # Check if this is the target keyframe (blue)
+            with self.states.lock:
+                target_kf_idx = self.states.target_keyframe_idx.value
+            
+            if kf_idx == target_kf_idx:
+                color = [0, 0, 1, 1]  # blue for target keyframe
+            else:
+                color = [1, 0, 0, 1]  # red for original keyframes
                 
             if self.show_keyframe:
                 self.frustums.add(
@@ -170,6 +346,58 @@ class Window(WindowEvents):
             ptex, ctex, itex = self.textures[keyframe.frame_id]
             if self.show_all:
                 self.render_pointmap(keyframe.T_WC.cpu(), w, h, ptex, ctex, itex)
+
+        # Render predicted wheel poses in purple (all of them)
+        if self.show_predicted_poses and self.predicted_poses and self.load_preds_enabled:
+            for i, pose_data in enumerate(self.predicted_poses):
+                if 'predicted' in pose_data:
+                    pred_pose = pose_data['predicted']
+                    
+                    self.frustums.add(
+                        as_SE3(pred_pose.cpu()),
+                        scale=self.frustum_scale * 0.8,  # Slightly smaller for visibility
+                        color=[1, 0, 1, 1],  # purple for predicted poses
+                        thickness=self.line_thickness * self.scale,
+                    )
+
+        # Render ground truth wheel poses in yellow (all of them)
+        if self.show_ground_truth_poses and self.predicted_poses and self.load_preds_enabled:
+            for i, pose_data in enumerate(self.predicted_poses):
+                if 'ground_truth_wheel' in pose_data:
+                    gt_wheel_pose = pose_data['ground_truth_wheel']
+                    
+                    self.frustums.add(
+                        as_SE3(gt_wheel_pose.cpu()),
+                        scale=self.frustum_scale * 1.0,  # Standard size
+                        color=[1, 1, 0, 1],  # yellow for ground truth wheel poses
+                        thickness=self.line_thickness * self.scale * 1.2,  # Thicker for visibility
+                    )
+
+        # Render ground truth camera poses in orange (all of them)
+        if self.show_ground_truth_poses and self.predicted_poses and self.load_preds_enabled:
+            for i, pose_data in enumerate(self.predicted_poses):
+                if 'ground_truth' in pose_data:
+                    gt_pose = pose_data['ground_truth']
+                    
+                    self.frustums.add(
+                        as_SE3(gt_pose.cpu()),
+                        scale=self.frustum_scale * 1.2,  # Slightly larger for visibility
+                        color=[1, 0.5, 0, 1],  # orange for ground truth poses
+                        thickness=self.line_thickness * self.scale * 1.5,  # Thicker for visibility
+                    )
+
+        # Render transposed ground truth wheel poses in white (all of them)
+        if self.show_predicted_poses and self.predicted_poses and self.load_preds_enabled:
+            for i, pose_data in enumerate(self.predicted_poses):
+                if 'ground_truth_transposed_wheel' in pose_data:
+                    gt_transposed_wheel_pose = pose_data['ground_truth_transposed_wheel']
+                    
+                    self.frustums.add(
+                        as_SE3(gt_transposed_wheel_pose.cpu()),
+                        scale=self.frustum_scale * 1.1,  # Slightly larger for visibility
+                        color=[1, 1, 1, 1],  # white for transposed wheel poses
+                        thickness=self.line_thickness * self.scale * 1.3,  # Thicker for visibility
+                    )
 
         if self.show_keyframe_edges:
             with self.states.lock:
@@ -300,6 +528,21 @@ class Window(WindowEvents):
             "show_curr_pointmap", self.show_curr_pointmap
         )
         _, self.show_axis = imgui.checkbox("show_axis", self.show_axis)
+        
+        # Add checkbox for showing predicted poses
+        _, self.show_predicted_poses = imgui.checkbox("show_predicted_poses", self.show_predicted_poses)
+        _, self.show_ground_truth_poses = imgui.checkbox("show_ground_truth_poses", self.show_ground_truth_poses)
+        
+        imgui.spacing()
+        imgui.text("Color Legend:")
+        imgui.text("  Green: Current camera")
+        imgui.text("  Red: Original keyframes")
+        imgui.text("  Yellow: Ground truth wheel poses")
+        imgui.text("  Blue: Target keyframe")
+        imgui.text("  Purple: Predicted wheel poses")
+        imgui.text("  Orange: Ground truth camera poses (SLAM)")
+        imgui.text("  White: Transposed ground truth wheel poses (x→-z, y→x, z→y)")
+        
         _, self.line_thickness = imgui.drag_float(
             "line_thickness", self.line_thickness, 0.1, 10, 0.5
         )
@@ -381,7 +624,7 @@ class Window(WindowEvents):
         return frame.X_canon.cpu().numpy().astype(np.float32)
 
 
-def run_visualization(cfg, states, keyframes, main2viz, viz2main) -> None:
+def run_visualization(cfg, states, keyframes, main2viz, viz2main, load_preds=False) -> None:
     set_global_config(cfg)
 
     config_cls = Window
@@ -414,6 +657,10 @@ def run_visualization(cfg, states, keyframes, main2viz, viz2main) -> None:
         wnd=window,
         timer=timer,
     )
+    
+    # Set the load_preds flag
+    window_config.load_preds_enabled = load_preds
+    
     # Avoid the event assigning in the property setter for now
     # We want the even assigning to happen in WindowConfig.__init__
     # so users are free to assign them in their own __init__.

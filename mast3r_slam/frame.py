@@ -158,6 +158,7 @@ class SharedStates:
         self.save_info = manager.dict({'should_save': False, 'save_dir': '', 'timestamps': []})
         self.target_keyframe_idx = manager.Value("i", -1)  # idx of target kf
         self.show_target_keyframe = manager.Value("i", 0)  # show target kf in blue
+        self.prediction_keyframe_indices = manager.list()  # indices of keyframes with predictions
 
     def set_frame(self, frame):
         with self.lock:
