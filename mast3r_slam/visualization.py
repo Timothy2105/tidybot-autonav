@@ -327,10 +327,15 @@ class Window(WindowEvents):
                 self.kf_img.write(self.kf_img_np)
 
             # Check if this is the target keyframe (blue)
-            with self.states.lock:
-                target_kf_idx = self.states.target_keyframe_idx.value
+            target_kf_idx = -1  # Default: no target
+            try:
+                with self.states.lock:
+                    target_kf_idx = self.states.target_keyframe_idx.value
+            except (KeyError, AttributeError):
+                # Handle multiprocessing access issues gracefully
+                pass
             
-            if kf_idx == target_kf_idx:
+            if kf_idx == target_kf_idx and target_kf_idx >= 0:
                 color = [0, 0, 1, 1]  # blue for target keyframe
             else:
                 color = [1, 0, 0, 1]  # red for original keyframes
