@@ -908,6 +908,7 @@ if __name__ == "__main__":
                             if abs(tidybot_rotation_deg) < 5.0:  # Less than 5 degrees
                                 tidybot_rotation_deg = 0
                             
+                            print(f"🤖 TIDYBOT COMMANDS:")
                             print(f"   TidyBot Command: [{tidybot_y:.3f}, {tidybot_x:.3f}, {tidybot_rotation_deg:.1f}°]")
                             print(f"   Explanation:")
                             if tidybot_y != 0:
@@ -917,7 +918,7 @@ if __name__ == "__main__":
                             if tidybot_rotation_deg != 0:
                                 print(f"     Rotation: {tidybot_rotation_deg:+.1f}° ({'ROTATE LEFT' if tidybot_rotation_deg > 0 else 'ROTATE RIGHT'})")
                             if tidybot_y == 0 and tidybot_x == 0 and tidybot_rotation_deg == 0:
-                                print(f"     No movement required (within thresholds)")
+                                print(f"     ✅ No movement required (within thresholds)")
                             print("   ---")
                             
                             # Send command to robot if enabled
@@ -978,7 +979,8 @@ if __name__ == "__main__":
                             
                             # Set target keyframe for visualization
                             with states.lock:
-                                states.target_keyframe_idx = nearest_kf_idx
+                                states.target_keyframe_idx.value = nearest_kf_idx
+                            print(f"🎯 VISUALIZATION: Set target keyframe to {nearest_kf_idx} (should appear BLUE in viewer)")
                             
                             # After giving the movement command, end the script
                             # print(f"GIVEN MOVEMENT COMMAND - Ending trajectory following.")
