@@ -8,150 +8,107 @@ import cv2
 from scipy.spatial.transform import Rotation as R
 
 
+def generate_tilted_circle_cameras():
+    # Circle parameters
+    radius = 1.0
+    num_points = 16  # Match the number of wheel end poses
+
+    # Generate points
+    points = []
+    for i in range(num_points):
+        # Angle for each point (evenly spaced around circle)
+        angle = 2 * np.pi * i / num_points
+        
+        # Circle points in XZ plane (Y=0)
+        x = radius * np.cos(angle)
+        y = 0.0
+        z = radius * np.sin(angle)
+        
+        # Create rotation for camera to face inward toward origin
+        # Camera needs to look from its position toward (0,0,0)
+        
+        # Direction from camera position to center
+        look_dir = np.array([-x, -y, -z])
+        look_dir = look_dir / np.linalg.norm(look_dir)
+        
+        # Forward vector (where camera looks)
+        forward = look_dir
+        
+        # Up vector is world Y axis
+        up = np.array([0, 1, 0])
+        
+        # Right vector = up × forward
+        right = np.cross(up, forward)
+        right = right / np.linalg.norm(right)
+        
+        # Recalculate up to ensure orthogonality
+        up = np.cross(forward, right)
+        up = up / np.linalg.norm(up)
+        
+        # Build rotation matrix (camera looks along +Z in its local frame)
+        R_matrix = np.column_stack([right, up, forward])
+        
+        # Convert rotation matrix to quaternion
+        rotation = R.from_matrix(R_matrix)
+        q = rotation.as_quat(scalar_first=True)  # [w, x, y, z]
+        
+        # Format: [x, y, z, qw, qx, qy, qz]
+        point = [x, y, z, q[0], q[1], q[2], q[3]]
+        points.append(point)
+        
+        # Print each point
+        print(f"Camera Point {i}: [{x:.4f}, {y:.4f}, {z:.4f}, {q[0]:.4f}, {q[1]:.4f}, {q[2]:.4f}, {q[3]:.4f}]")
+    
+    return points
+
+
 wheel_start_pose_0 = [0.000, 0.000, 0.0]  # x, y, theta (degrees)
 wheel_end_pose_0 = [0.295, 0.000, 22.5]  # x, y, theta (degrees)
-cam_start_pose_0 = [1.613, -0.025, 0.658, 0.042132, 0.269313, 0.053504, 0.960642]  # xyz, wxyz
-cam_end_pose_0 = [1.371, 0.063, 0.204, 0.060310, 0.135636, 0.039643, 0.988127]  # xyz, wxyz
 
 wheel_start_pose_1 = [0.295, -0.000, 22.5]  # x, y, theta (degrees)
 wheel_end_pose_1 = [0.567, 0.113, 45.1]  # x, y, theta (degrees)
-cam_start_pose_1 = [1.484, 0.106, 0.254, 0.071914, 0.057991, 0.032786, 0.995184]  # xyz, wxyz
-cam_end_pose_1 = [1.569, 0.095, 0.337, 0.076506, 0.054139, 0.027955, 0.995206]  # xyz, wxyz
 
 wheel_start_pose_2 = [0.566, 0.112, 45.0]  # x, y, theta (degrees)
 wheel_end_pose_2 = [0.775, 0.320, 67.4]  # x, y, theta (degrees)
-cam_start_pose_2 = [1.644, 0.137, 0.510, 0.087999, -0.141576, 0.018991, 0.985825]  # xyz, wxyz
-cam_end_pose_2 = [1.635, 0.117, 0.686, 0.092474, -0.306174, 0.001773, 0.947472]  # xyz, wxyz
 
 wheel_start_pose_3 = [0.775, 0.320, 67.5]  # x, y, theta (degrees)
 wheel_end_pose_3 = [0.887, 0.592, 90.0]  # x, y, theta (degrees)
-cam_start_pose_3 = [1.604, 0.114, 0.750, 0.095951, -0.332223, 0.000158, 0.938308]  # xyz, wxyz
-cam_end_pose_3 = [1.621, 0.089, 0.864, 0.094145, -0.507060, -0.017871, 0.856567]  # xyz, wxyz
 
 wheel_start_pose_4 = [0.888, 0.592, 90.0]  # x, y, theta (degrees)
 wheel_end_pose_4 = [0.887, 0.886, 112.5]  # x, y, theta (degrees)
-cam_start_pose_4 = [1.604, 0.094, 0.894, 0.095964, -0.517236, -0.018057, 0.850254]  # xyz, wxyz
-cam_end_pose_4 = [1.463, 0.084, 1.003, 0.101290, -0.616556, -0.023326, 0.780419]  # xyz, wxyz
 
 wheel_start_pose_5 = [0.887, 0.887, 112.5]  # x, y, theta (degrees)
 wheel_end_pose_5 = [0.778, 1.158, 134.8]  # x, y, theta (degrees)
-cam_start_pose_5 = [1.397, 0.053, 1.066, 0.099586, -0.672314, -0.032764, 0.732805]  # xyz, wxyz
-cam_end_pose_5 = [1.176, 0.044, 1.084, 0.101732, -0.752173, -0.042902, 0.649650]  # xyz, wxyz
 
 wheel_start_pose_6 = [0.775, 1.158, 134.9]  # x, y, theta (degrees)
 wheel_end_pose_6 = [0.568, 1.367, 157.4]  # x, y, theta (degrees)
-cam_start_pose_6 = [1.131, 0.033, 1.101, 0.099513, -0.802825, -0.051637, 0.585580]  # xyz, wxyz
-cam_end_pose_6 = [1.093, -0.003, 1.142, 0.083582, -0.889283, -0.069003, 0.444328]  # xyz, wxyz
 
 wheel_start_pose_7 = [0.567, 1.367, 157.3]  # x, y, theta (degrees)
 wheel_end_pose_7 = [0.293, 1.478, 179.6]  # x, y, theta (degrees)
-cam_start_pose_7 = [1.086, -0.089, 1.365, 0.081452, -0.875221, -0.068192, 0.471914]  # xyz, wxyz
-cam_end_pose_7 = [0.737, -0.073, 1.167, 0.068101, -0.940973, -0.076547, 0.322602]  # xyz, wxyz
 
 wheel_start_pose_8 = [0.295, 1.480, 179.9]  # x, y, theta (degrees)
 wheel_end_pose_8 = [0.001, 1.481, 202.4]  # x, y, theta (degrees)
-cam_start_pose_8 = [0.758, -0.085, 1.237, 0.066722, -0.949187, -0.077885, 0.297534]  # xyz, wxyz
-cam_end_pose_8 = [0.463, -0.050, 0.869, 0.052936, -0.982472, -0.089128, 0.154930]  # xyz, wxyz
 
 wheel_start_pose_9 = [0.001, 1.481, 202.4]  # x, y, theta (degrees)
 wheel_end_pose_9 = [-0.272, 1.369, 224.8]  # x, y, theta (degrees)
-cam_start_pose_9 = [0.398, -0.032, 0.841, 0.052105, -0.990033, -0.087928, 0.096889]  # xyz, wxyz
-cam_end_pose_9 = [0.320, -0.028, 0.830, 0.042324, -0.994438, -0.092590, -0.026983]  # xyz, wxyz
 
 wheel_start_pose_10 = [-0.271, 1.368, 224.9]  # x, y, theta (degrees)
 wheel_end_pose_10 = [-0.480, 1.161, 247.4]  # x, y, theta (degrees)
-cam_start_pose_10 = [0.305, 0.002, 0.728, 0.034676, -0.989441, -0.091803, -0.106664]  # xyz, wxyz
-cam_end_pose_10 = [0.266, 0.017, 0.528, 0.011012, -0.953261, -0.093633, -0.287062]  # xyz, wxyz
 
 wheel_start_pose_11 = [-0.480, 1.160, 247.5]  # x, y, theta (degrees)
 wheel_end_pose_11 = [-0.592, 0.888, 270.0]  # x, y, theta (degrees)
-cam_start_pose_11 = [0.249, 0.018, 0.528, 0.008689, -0.946013, -0.092764, -0.310450]  # xyz, wxyz
-cam_end_pose_11 = [0.374, 0.073, 0.314, -0.005825, -0.894434, -0.090784, -0.437850]  # xyz, wxyz
 
 wheel_start_pose_12 = [-0.592, 0.888, 270.2]  # x, y, theta (degrees)
 wheel_end_pose_12 = [-0.592, 0.593, 292.5]  # x, y, theta (degrees)
-cam_start_pose_12 = [0.389, 0.096, 0.234, -0.009723, -0.867485, -0.089460, -0.489257]  # xyz, wxyz
-cam_end_pose_12 = [0.616, 0.158, 0.049, -0.026668, -0.784594, -0.085875, -0.613455]  # xyz, wxyz
 
 wheel_start_pose_13 = [-0.592, 0.594, 292.7]  # x, y, theta (degrees)
 wheel_end_pose_13 = [-0.480, 0.321, 314.9]  # x, y, theta (degrees)
-cam_start_pose_13 = [0.736, 0.193, 0.013, -0.037160, -0.745390, -0.078751, -0.660917]  # xyz, wxyz
-cam_end_pose_13 = [0.741, 0.197, -0.064, -0.051600, -0.628347, -0.072967, -0.772783]  # xyz, wxyz
 
 wheel_start_pose_14 = [-0.479, 0.322, 315.2]  # x, y, theta (degrees)
 wheel_end_pose_14 = [-0.270, 0.115, 337.7]  # x, y, theta (degrees)
-cam_start_pose_14 = [0.762, 0.196, -0.073, -0.054850, -0.596592, -0.072352, -0.797393]  # xyz, wxyz
-cam_end_pose_14 = [0.962, 0.206, -0.075, -0.072397, -0.435906, -0.057509, -0.895230]  # xyz, wxyz
 
 wheel_start_pose_15 = [-0.270, 0.115, 337.7]  # x, y, theta (degrees)
 wheel_end_pose_15 = [0.003, 0.004, 360.2]  # x, y, theta (degrees)
-cam_start_pose_15 = [0.961, 0.212, -0.092, -0.074099, -0.416891, -0.054416, -0.904295]  # xyz, wxyz
-cam_end_pose_15 = [1.065, 0.200, -0.031, -0.080559, -0.316492, -0.048290, -0.943934]  # xyz, wxyz
-
-# WHEEL ODOMETRY START POSE: [x=0.775, y=0.320, theta=67.5°]
-# WHEEL ODOMETRY END POSE:   [x=0.887, y=0.592, theta=90.0°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=1.604, y=0.114, z=0.750][w=0.095951, x=-0.332223, y=0.000158, z=0.938308]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=1.621, y=0.089, z=0.864][w=0.094145, x=-0.507060, y=-0.017871, z=0.856567]
-
-# WHEEL ODOMETRY START POSE: [x=0.888, y=0.592, theta=90.0°]
-# WHEEL ODOMETRY END POSE:   [x=0.887, y=0.886, theta=112.5°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=1.604, y=0.094, z=0.894][w=0.095964, x=-0.517236, y=-0.018057, z=0.850254]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=1.463, y=0.084, z=1.003][w=0.101290, x=-0.616556, y=-0.023326, z=0.780419]
-
-# WHEEL ODOMETRY START POSE: [x=0.887, y=0.887, theta=112.5°]
-# WHEEL ODOMETRY END POSE:   [x=0.778, y=1.158, theta=134.8°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=1.397, y=0.053, z=1.066][w=0.099586, x=-0.672314, y=-0.032764, z=0.732805]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=1.176, y=0.044, z=1.084][w=0.101732, x=-0.752173, y=-0.042902, z=0.649650]
-
-# WHEEL ODOMETRY START POSE: [x=0.775, y=1.158, theta=134.9°]
-# WHEEL ODOMETRY END POSE:   [x=0.568, y=1.367, theta=157.4°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=1.131, y=0.033, z=1.101][w=0.099513, x=-0.802825, y=-0.051637, z=0.585580]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=1.093, y=-0.003, z=1.142][w=0.083582, x=-0.889283, y=-0.069003, z=0.444328]
-
-# WHEEL ODOMETRY START POSE: [x=0.567, y=1.367, theta=157.3°]
-# WHEEL ODOMETRY END POSE:   [x=0.293, y=1.478, theta=179.6°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=1.086, y=-0.089, z=1.365][w=0.081452, x=-0.875221, y=-0.068192, z=0.471914]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=0.737, y=-0.073, z=1.167][w=0.068101, x=-0.940973, y=-0.076547, z=0.322602]
-
-# WHEEL ODOMETRY START POSE: [x=0.295, y=1.480, theta=179.9°]
-# WHEEL ODOMETRY END POSE:   [x=0.001, y=1.481, theta=202.4°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=0.758, y=-0.085, z=1.237][w=0.066722, x=-0.949187, y=-0.077885, z=0.297534]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=0.463, y=-0.050, z=0.869][w=0.052936, x=-0.982472, y=-0.089128, z=0.154930]
-
-# WHEEL ODOMETRY START POSE: [x=0.001, y=1.481, theta=202.4°]
-# WHEEL ODOMETRY END POSE:   [x=-0.272, y=1.369, theta=224.8°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=0.398, y=-0.032, z=0.841][w=0.052105, x=-0.990033, y=-0.087928, z=0.096889]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=0.320, y=-0.028, z=0.830][w=0.042324, x=-0.994438, y=-0.092590, z=-0.026983]
-
-# WHEEL ODOMETRY START POSE: [x=-0.271, y=1.368, theta=224.9°]
-# WHEEL ODOMETRY END POSE:   [x=-0.480, y=1.161, theta=247.4°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=0.305, y=0.002, z=0.728][w=0.034676, x=-0.989441, y=-0.091803, z=-0.106664]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=0.266, y=0.017, z=0.528][w=0.011012, x=-0.953261, y=-0.093633, z=-0.287062]
-
-# WHEEL ODOMETRY START POSE: [x=-0.480, y=1.160, theta=247.5°]
-# WHEEL ODOMETRY END POSE:   [x=-0.592, y=0.888, theta=270.0°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=0.249, y=0.018, z=0.528][w=0.008689, x=-0.946013, y=-0.092764, z=-0.310450]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=0.374, y=0.073, z=0.314][w=-0.005825, x=-0.894434, y=-0.090784, z=-0.437850]
-
-# WHEEL ODOMETRY START POSE: [x=-0.592, y=0.888, theta=270.2°]
-# WHEEL ODOMETRY END POSE:   [x=-0.592, y=0.593, theta=292.5°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=0.389, y=0.096, z=0.234][w=-0.009723, x=-0.867485, y=-0.089460, z=-0.489257]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=0.616, y=0.158, z=0.049][w=-0.026668, x=-0.784594, y=-0.085875, z=-0.613455]
-
-# WHEEL ODOMETRY START POSE: [x=-0.592, y=0.594, theta=292.7°]
-# WHEEL ODOMETRY END POSE:   [x=-0.480, y=0.321, theta=314.9°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=0.736, y=0.193, z=0.013][w=-0.037160, x=-0.745390, y=-0.078751, z=-0.660917]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=0.741, y=0.197, z=-0.064][w=-0.051600, x=-0.628347, y=-0.072967, z=-0.772783]
-
-# WHEEL ODOMETRY START POSE: [x=-0.479, y=0.322, theta=315.2°]
-# WHEEL ODOMETRY END POSE:   [x=-0.270, y=0.115, theta=337.7°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=0.762, y=0.196, z=-0.073][w=-0.054850, x=-0.596592, y=-0.072352, z=-0.797393]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=0.962, y=0.206, z=-0.075][w=-0.072397, x=-0.435906, y=-0.057509, z=-0.895230]
-
-# WHEEL ODOMETRY START POSE: [x=-0.270, y=0.115, theta=337.7°]
-# WHEEL ODOMETRY END POSE:   [x=0.003, y=0.004, theta=360.2°]
-# CAMERA ESTIMATED START POSITION (SLAM): [x=0.961, y=0.212, z=-0.092][w=-0.074099, x=-0.416891, y=-0.054416, z=-0.904295]
-# CAMERA ESTIMATED END POSITION (SLAM):   [x=1.065, y=0.200, z=-0.031][w=-0.080559, x=-0.316492, y=-0.048290, z=-0.943934]
 
 wheel_poses = [
     wheel_start_pose_0, wheel_end_pose_0,
@@ -172,24 +129,43 @@ wheel_poses = [
     wheel_start_pose_15, wheel_end_pose_15
 ]
 
-cam_poses = [
-    cam_start_pose_0, cam_end_pose_0,
-    cam_start_pose_1, cam_end_pose_1,
-    cam_start_pose_2, cam_end_pose_2,
-    cam_start_pose_3, cam_end_pose_3,
-    cam_start_pose_4, cam_end_pose_4,
-    cam_start_pose_5, cam_end_pose_5,
-    cam_start_pose_6, cam_end_pose_6,
-    cam_start_pose_7, cam_end_pose_7,
-    cam_start_pose_8, cam_end_pose_8,
-    cam_start_pose_9, cam_end_pose_9,
-    cam_start_pose_10, cam_end_pose_10,
-    cam_start_pose_11, cam_end_pose_11,
-    cam_start_pose_12, cam_end_pose_12,
-    cam_start_pose_13, cam_end_pose_13,
-    cam_start_pose_14, cam_end_pose_14,
-    cam_start_pose_15, cam_end_pose_15
-]
+# Generate synthetic camera poses using the circular arrangement
+synthetic_cam_poses = generate_tilted_circle_cameras()
+
+# Apply 20 degree rotation about x-axis to all synthetic poses
+x_rotation_matrix = np.array([
+    [1, 0, 0],
+    [0, np.cos(np.radians(20)), -np.sin(np.radians(20))],
+    [0, np.sin(np.radians(20)), np.cos(np.radians(20))]
+])
+
+rotated_cam_poses = []
+for pose in synthetic_cam_poses:
+    # Extract position and quaternion
+    position = np.array(pose[:3])
+    quat_wxyz = np.array(pose[3:])
+    
+    # Rotate position
+    rotated_position = x_rotation_matrix @ position
+    
+    # Rotate orientation: convert quat to rotation matrix, apply rotation, convert back
+    original_rotation = R.from_quat([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])  # Convert to xyzw format
+    original_rot_matrix = original_rotation.as_matrix()
+    rotated_rot_matrix = x_rotation_matrix @ original_rot_matrix
+    rotated_rotation = R.from_matrix(rotated_rot_matrix)
+    rotated_quat_xyzw = rotated_rotation.as_quat()
+    rotated_quat_wxyz = [rotated_quat_xyzw[3], rotated_quat_xyzw[0], rotated_quat_xyzw[1], rotated_quat_xyzw[2]]  # Convert back to wxyz
+    
+    # Create new pose
+    rotated_pose = [rotated_position[0], rotated_position[1], rotated_position[2], 
+                   rotated_quat_wxyz[0], rotated_quat_wxyz[1], rotated_quat_wxyz[2], rotated_quat_wxyz[3]]
+    rotated_cam_poses.append(rotated_pose)
+
+# Create cam_poses list with rotated synthetic end poses
+cam_poses = []
+for i in range(16):
+    cam_poses.append(rotated_cam_poses[i])  # Start pose
+    cam_poses.append(rotated_cam_poses[i])  # End pose (same as start for synthetic data)
 
 
 def z_rotation_to_quaternion(theta_degrees):
@@ -292,7 +268,7 @@ if __name__ == "__main__":
   server = viser.ViserServer()
   server.set_up_direction((0.0, -1.0, 0.0)) 
 
-  wheel_translations = [np.array([pose[0], pose[1], 10.0]) for pose in wheel_poses]
+  wheel_translations = [np.array([pose[0], pose[1], 0.0]) for pose in wheel_poses]
   wheel_rotations = [rotation_matrix_z(pose[2]) for pose in wheel_poses]
 
   cam_translations = [np.array(pose[0:3]) for pose in cam_poses]
@@ -323,7 +299,7 @@ if __name__ == "__main__":
     wheel_position = np.array([wheel_pose[0], wheel_pose[1], 0.0])
     server.scene.add_frame(f"/wheel/{i}", wxyz=wheel_wxyz, position=wheel_position,
                            axes_length=0.294, axes_radius=0.01)    
-
+ 
   for i, wheel_pose in enumerate(wheel_poses):
 
     wheel_rot = rotation_matrix_z(wheel_pose[2])
@@ -332,9 +308,8 @@ if __name__ == "__main__":
     wheel_pose[0:3, 0:3] = wheel_rot
     wheel_pose[0:3, 3] = wheel_position
 
-    T_base2cam = np.linalg.inv(T_cam2base) @ wheel_pose
-    # wheel_pose = T_cam2base @ wheel_pose
-    wheel_pose = T_base2cam @ wheel_pose
+    # Apply the hand-eye calibration transformation
+    wheel_pose = np.linalg.inv(T_cam2base) @ wheel_pose
     wheel_position = wheel_pose[0:3, 3]
     wheel_wxyz = R.from_matrix(wheel_pose[0:3, 0:3]).as_quat(scalar_first=True)
 
