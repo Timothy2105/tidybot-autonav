@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation as R
 
 def generate_tilted_circle_cameras():
     # Circle parameters
-    radius = 1.0
+    radius = 2.0
     num_points = 16  # Match the number of wheel end poses
 
     # Generate points
@@ -57,7 +57,7 @@ def generate_tilted_circle_cameras():
         points.append(point)
         
         # Print each point
-        print(f"Camera Point {i}: [{x:.4f}, {y:.4f}, {z:.4f}, {q[0]:.4f}, {q[1]:.4f}, {q[2]:.4f}, {q[3]:.4f}]")
+        # print(f"Camera Point {i}: [{x:.4f}, {y:.4f}, {z:.4f}, {q[0]:.4f}, {q[1]:.4f}, {q[2]:.4f}, {q[3]:.4f}]")
     
     return points
 
@@ -128,45 +128,6 @@ wheel_poses = [
     wheel_start_pose_14, wheel_end_pose_14,
     wheel_start_pose_15, wheel_end_pose_15
 ]
-
-# Generate synthetic camera poses using the circular arrangement
-synthetic_cam_poses = generate_tilted_circle_cameras()
-
-# Apply 20 degree rotation about x-axis to all synthetic poses
-x_rotation_matrix = np.array([
-    [1, 0, 0],
-    [0, np.cos(np.radians(20)), -np.sin(np.radians(20))],
-    [0, np.sin(np.radians(20)), np.cos(np.radians(20))]
-])
-
-rotated_cam_poses = []
-for pose in synthetic_cam_poses:
-    # Extract position and quaternion
-    position = np.array(pose[:3])
-    quat_wxyz = np.array(pose[3:])
-    
-    # Rotate position
-    rotated_position = x_rotation_matrix @ position
-    
-    # Rotate orientation: convert quat to rotation matrix, apply rotation, convert back
-    original_rotation = R.from_quat([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])  # Convert to xyzw format
-    original_rot_matrix = original_rotation.as_matrix()
-    rotated_rot_matrix = x_rotation_matrix @ original_rot_matrix
-    rotated_rotation = R.from_matrix(rotated_rot_matrix)
-    rotated_quat_xyzw = rotated_rotation.as_quat()
-    rotated_quat_wxyz = [rotated_quat_xyzw[3], rotated_quat_xyzw[0], rotated_quat_xyzw[1], rotated_quat_xyzw[2]]  # Convert back to wxyz
-    
-    # Create new pose
-    rotated_pose = [rotated_position[0], rotated_position[1], rotated_position[2], 
-                   rotated_quat_wxyz[0], rotated_quat_wxyz[1], rotated_quat_wxyz[2], rotated_quat_wxyz[3]]
-    rotated_cam_poses.append(rotated_pose)
-
-# Create cam_poses list with rotated synthetic end poses
-cam_poses = []
-for i in range(16):
-    cam_poses.append(rotated_cam_poses[i])  # Start pose
-    cam_poses.append(rotated_cam_poses[i])  # End pose (same as start for synthetic data)
-
 
 def z_rotation_to_quaternion(theta_degrees):
     theta_radians = math.radians(theta_degrees)
@@ -266,56 +227,106 @@ def quaternion_wxyz_to_rotation_matrix_scipy(q_wxyz):
 
 if __name__ == "__main__":
   server = viser.ViserServer()
-  server.set_up_direction((0.0, -1.0, 0.0)) 
+  server.scene.set_up_direction((0.0, -1.0, 0.0)) 
 
-  wheel_translations = [np.array([pose[0], pose[1], 0.0]) for pose in wheel_poses]
-  wheel_rotations = [rotation_matrix_z(pose[2]) for pose in wheel_poses]
-
-  cam_translations = [np.array(pose[0:3]) for pose in cam_poses]
-  cam_rotations = [quaternion_wxyz_to_rotation_matrix_scipy(pose[3:]) for pose in cam_poses]
-
-  T_rot, T_trans = cv2.calibrateHandEye(
-      R_gripper2base=wheel_rotations,
-      t_gripper2base=wheel_translations,
-      R_target2cam=cam_rotations,
-      t_target2cam=cam_translations,
-      method=4,
-  )
-  T_cam2base = np.eye(4)
-  T_cam2base[0:3, 0:3] = T_rot
-  T_cam2base[0:3, 3:4] = T_trans
-
-  for i, cam_pose in enumerate(cam_poses):
-    cam_wxyz = np.array(cam_pose[3:])
-    cam_position = np.array(cam_pose[0:3])
-    server.scene.add_frame(f"/cam/{i}", wxyz=cam_wxyz, position=cam_position,
-                           axes_length=0.294, axes_radius=0.01)  
-    # fov = 2 * np.arctan2(800 / 2, 90)
-    # aspect = 800.0 / 600.0
-    # server.scene.add_camera_frustum(f"/cam_frustum/{i}", fov, aspect, cam_wxyz, cam_position)  
-
-  for i, wheel_pose in enumerate(wheel_poses):
-    wheel_wxyz = z_rotation_to_quaternion(wheel_pose[2])
-    wheel_position = np.array([wheel_pose[0], wheel_pose[1], 0.0])
-    server.scene.add_frame(f"/wheel/{i}", wxyz=wheel_wxyz, position=wheel_position,
-                           axes_length=0.294, axes_radius=0.01)    
- 
-  for i, wheel_pose in enumerate(wheel_poses):
-
-    wheel_rot = rotation_matrix_z(wheel_pose[2])
-    wheel_position = np.array([wheel_pose[0], wheel_pose[1], 0.0])
-    wheel_pose = np.eye(4)
-    wheel_pose[0:3, 0:3] = wheel_rot
-    wheel_pose[0:3, 3] = wheel_position
-
-    # Apply the hand-eye calibration transformation
-    wheel_pose = np.linalg.inv(T_cam2base) @ wheel_pose
-    wheel_position = wheel_pose[0:3, 3]
-    wheel_wxyz = R.from_matrix(wheel_pose[0:3, 0:3]).as_quat(scalar_first=True)
-
-    server.scene.add_frame(f"/wheel_C/{i}", wxyz=wheel_wxyz, position=wheel_position,
-                           axes_length=0.294, axes_radius=0.01)
+  angle = 20
 
   while True:
+    angle+=3
+    server.scene.reset()
+
+    # Generate synthetic camera poses using the circular arrangement
+    synthetic_cam_poses = generate_tilted_circle_cameras()
+
+    # Apply 20 degree rotation about x-axis to all synthetic poses
+    x_rotation_matrix = np.array([
+        [1, 0, 0],
+        [0, np.cos(np.radians(angle % 360)), -np.sin(np.radians(angle % 360))],
+        [0, np.sin(np.radians(angle % 360)), np.cos(np.radians(angle % 360))]
+    ])
+
+    rotated_cam_poses = []
+    for pose in synthetic_cam_poses:
+        # Extract position and quaternion
+        position = np.array(pose[:3])
+        quat_wxyz = np.array(pose[3:])
+        
+        # Rotate position
+        rotated_position = x_rotation_matrix @ position
+        
+        # Rotate orientation: convert quat to rotation matrix, apply rotation, convert back
+        original_rotation = R.from_quat([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])  # Convert to xyzw format
+        original_rot_matrix = original_rotation.as_matrix()
+        rotated_rot_matrix = x_rotation_matrix @ original_rot_matrix
+        rotated_rotation = R.from_matrix(rotated_rot_matrix)
+        rotated_quat_xyzw = rotated_rotation.as_quat()
+        rotated_quat_wxyz = [rotated_quat_xyzw[3], rotated_quat_xyzw[0], rotated_quat_xyzw[1], rotated_quat_xyzw[2]]  # Convert back to wxyz
+        
+        # Create new pose
+        rotated_pose = [rotated_position[0], rotated_position[1], rotated_position[2], 
+                      rotated_quat_wxyz[0], rotated_quat_wxyz[1], rotated_quat_wxyz[2], rotated_quat_wxyz[3]]
+        rotated_cam_poses.append(rotated_pose)
+
+    # Create cam_poses list with rotated synthetic end poses
+    cam_poses = []
+    for i in range(16):
+        cam_poses.append(rotated_cam_poses[i])  # Start pose
+        cam_poses.append(rotated_cam_poses[i])  # End pose (same as start for synthetic data)
+
+
+
+    wheel_translations = [np.array([pose[0], pose[1], 0.0]) for pose in wheel_poses]
+    wheel_rotations = [rotation_matrix_z(pose[2]) for pose in wheel_poses]
+
+    cam_translations = [np.array(pose[0:3]) for pose in cam_poses]
+    cam_rotations = [quaternion_wxyz_to_rotation_matrix_scipy(pose[3:]) for pose in cam_poses]
+
+    try:
+      T_rot, T_trans = cv2.calibrateHandEye(
+          R_gripper2base=wheel_rotations,
+          t_gripper2base=wheel_translations,
+          R_target2cam=cam_rotations,
+          t_target2cam=cam_translations,
+          method=4,
+      )
+    except:
+      pass
+    T_cam2base = np.eye(4)
+    T_cam2base[0:3, 0:3] = T_rot
+    T_cam2base[0:3, 3:4] = T_trans
+
+    for i, cam_pose in enumerate(cam_poses):
+      cam_wxyz = np.array(cam_pose[3:])
+      cam_position = np.array(cam_pose[0:3])
+      server.scene.add_frame(f"/cam/{i}", wxyz=cam_wxyz, position=cam_position,
+                            axes_length=0.294, axes_radius=0.01)  
+      # fov = 2 * np.arctan2(800 / 2, 90)
+      # aspect = 800.0 / 600.0
+      # server.scene.add_camera_frustum(f"/cam_frustum/{i}", fov, aspect, cam_wxyz, cam_position)  
+
+    for i, wheel_pose in enumerate(wheel_poses):
+      wheel_wxyz = z_rotation_to_quaternion(wheel_pose[2])
+      wheel_position = np.array([wheel_pose[0], wheel_pose[1], 0.0])
+      server.scene.add_frame(f"/wheel/{i}", wxyz=wheel_wxyz, position=wheel_position,
+                            axes_length=0.294, axes_radius=0.01)    
+  
+    for i, wheel_pose in enumerate(wheel_poses):
+
+      wheel_rot = rotation_matrix_z(wheel_pose[2])
+      wheel_position = np.array([wheel_pose[0], wheel_pose[1], 0.0])
+      wheel_pose = np.eye(4)
+      wheel_pose[0:3, 0:3] = wheel_rot
+      wheel_pose[0:3, 3] = wheel_position
+
+      # Apply the hand-eye calibration transformation
+      try:
+        wheel_pose = np.linalg.inv(T_cam2base) @ wheel_pose
+        wheel_position = wheel_pose[0:3, 3]
+        wheel_wxyz = R.from_matrix(wheel_pose[0:3, 0:3]).as_quat(scalar_first=True)
+
+        server.scene.add_frame(f"/wheel_C/{i}", wxyz=wheel_wxyz, position=wheel_position,
+                              axes_length=0.294, axes_radius=0.01)
+      except:
+        pass
       # Add some coordinate frames to the scene. These will be visualized in the viewer.
-      time.sleep(0.5)
+    time.sleep(0.05)
