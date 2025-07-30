@@ -8,6 +8,7 @@ import lietorch
 import torch
 import tqdm
 import yaml
+import json
 import numpy as np
 from mast3r_slam.global_opt import FactorGraph
 
@@ -327,6 +328,8 @@ if __name__ == "__main__":
                        help="Enable robot calibration mode: test basic movement commands")
     parser.add_argument("--load-preds", action="store_true",
                        help="Load prediction data and enable prediction visualization")
+    parser.add_argument("--enable-click", action="store_true",
+                       help="Enable point cloud clicking functionality to get 3D coordinates")
 
     args = parser.parse_args()
     
@@ -384,7 +387,7 @@ if __name__ == "__main__":
     if not args.no_viz:
         viz = mp.Process(
             target=run_visualization,
-            args=(config, states, keyframes, main2viz, viz2main, args.load_preds),
+            args=(config, states, keyframes, main2viz, viz2main, args.load_preds, args.enable_click),
         )
         viz.start()
 
@@ -499,12 +502,7 @@ if __name__ == "__main__":
                 print(f"[REPLAY] Frame: {i} (FPS: {current_fps})")
             i += 1
         
-        # Don't terminate visualization - let it continue for live processing
-        # if not args.no_viz:
-        #     viz.terminate()
-        #     viz.join()
-        
-        # Save results from replay as usual
+        # save results from replay
         if dataset.save_results:
             save_dir, seq_name = eval.prepare_savedir(args, dataset)
             eval.save_traj(save_dir, f"{seq_name}_replay.txt", all_timestamps, keyframes)
@@ -533,7 +531,7 @@ if __name__ == "__main__":
     )
     backend.start()
 
-    # remove the trajectory from the previous run (but keep replay results)
+    # remove the trajectory from previous run
     if dataset.save_results:
         save_dir, seq_name = eval.prepare_savedir(args, dataset)
         traj_file = save_dir / f"{seq_name}.txt"
@@ -557,26 +555,26 @@ if __name__ == "__main__":
 
     frames = []
     
-    # For hybrid mode, track when we switch
+    # track when we switch
     switched_to_live = False
     
-    # For trajectory following, track if we've successfully relocalized
+    # track if we've successfully relocalized
     has_relocalized = False
     
-    # Track original keyframe count for trajectory following
+    # track original keyframe count
     original_kf_count = None
     if args.load_state:
         original_kf_count = len(keyframes)
         print(f"Original keyframe count: {original_kf_count}")
     
-    # Initialize robot interface if sending commands or in calibration mode
+    # initialize robot interface
     robot_interface = None
     if args.send_cmd:
         simulate = args.simulate_robot
         robot_interface = RobotInterface(simulate=simulate)
         print(f"Robot interface initialized (simulate={simulate})")
 
-    # Load prediction data if requested
+    # load prediction data
     if args.load_preds:
         print("Loading prediction data...")
         try:
@@ -585,17 +583,16 @@ if __name__ == "__main__":
             gt_file = "calib-results/kf-preds/ground_truth_camera_poses.npz"
             
             if os.path.exists(pred_file) and os.path.exists(gt_file):
-                # Load the prediction data
+                # load prediction data
                 pred_data = np.load(pred_file)
                 gt_data = np.load(gt_file)
                 
                 print(f"Loaded {len(pred_data['positions'])} prediction poses")
                 
-                # For now, we'll assume the first 4 keyframes correspond to the predictions
-                # In a real scenario, you'd need to map keyframes to predictions based on timestamps or other criteria
+                # assume the first 4 keyframes correspond to the predictions
                 prediction_kf_indices = list(range(min(4, len(keyframes))))
                 
-                # Set the prediction keyframe indices in the shared state
+                # set prediction keyframe indices
                 with states.lock:
                     states.prediction_keyframe_indices[:] = prediction_kf_indices
                 
@@ -605,10 +602,8 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error loading prediction data: {e}")
 
-    # Remove the immediate calibration block here
-    # Calibration will be triggered after relocalization in the main loop
-
-    calibration_ran = False  # Track if calibration has already run
+    # track if calibration has already run
+    calibration_ran = False
 
     while True:
         mode = states.get_mode()
@@ -626,7 +621,23 @@ if __name__ == "__main__":
         if not last_msg.is_paused:
             states.unpause()
 
-        # For hybrid mode, check if we've finished MP4 and need to switch
+        # check for clicked points from visualization
+        if args.enable_click:
+            try:
+                with keyframes.lock:
+                    # only process clicks if relocalized
+                    is_relocalized = keyframes.relocalized_flag.value == 1
+                    if is_relocalized and states.point_clicked.value == 1:
+                        clicked_coords = np.array(states.clicked_point[:])
+                        print(f"MAIN: Point clicked at coordinates: [{clicked_coords[0]:.3f}, {clicked_coords[1]:.3f}, {clicked_coords[2]:.3f}]")
+                        
+                        # reset flag
+                        states.point_clicked.value = 0
+                        
+            except Exception as e:
+                pass
+
+        # check if we've finished MP4 and need to switch
         if args.hybrid and not switched_to_live and isinstance(dataset, HybridDataset):
             if i >= len(dataset.mp4_dataset):
                 print(f"\nFinished processing MP4 ({i} frames). Switching to live mode...")
@@ -634,7 +645,7 @@ if __name__ == "__main__":
                 switched_to_live = True
                 print("Continue processing with live Realsense feed...")
 
-        # In hybrid live mode, we never reach the end
+        # in hybrid live mode, we never reach the end
         if not (args.hybrid and switched_to_live) and i == len(dataset):
             states.set_mode(Mode.TERMINATED)
             break
@@ -652,7 +663,7 @@ if __name__ == "__main__":
         frame = create_frame(i, img, T_WC, img_size=dataset.img_size, device=device)
 
         if mode == Mode.INIT:
-            # Initialize via mono inference, and encoded features neeed for database
+            # initialize via mono inference, and encoded features needed for database
             X_init, C_init = mast3r_inference_mono(model, frame)
             frame.update_pointmap(X_init, C_init)
             keyframes.append(frame)
@@ -668,10 +679,10 @@ if __name__ == "__main__":
                 states.set_mode(Mode.RELOC)
             states.set_frame(frame)
             
-            # Check if we just successfully relocalized (we're in TRACKING mode after RELOC)
+            # check if we just successfully relocalized (tracking after reloc)
             if (args.follow_traj or args.calib_robot) and not has_relocalized:
                 print(f"🔍 MAIN: In TRACKING mode, checking for relocalization (has_relocalized={has_relocalized})")
-                # Check if the backend has set the relocalization flag
+                # check if the backend relocalized
                 with keyframes.lock:
                     flag_value = keyframes.relocalized_flag.value
                     print(f"🔍 MAIN: Checking relocalized_flag.value = {flag_value}")
@@ -680,7 +691,7 @@ if __name__ == "__main__":
                             states.relocalized.value = 1
                         has_relocalized = True
                         print("🎯 RELOCALIZATION DETECTED - Starting post-relocalization action!")
-                        # Reset the flag
+                        # reset flag
                         keyframes.relocalized_flag.value = 0
                         print("🔧 MAIN: Reset relocalized_flag to 0")
 
@@ -689,7 +700,7 @@ if __name__ == "__main__":
             frame.update_pointmap(X, C)
             states.set_frame(frame)
             states.queue_reloc()
-            # In single threaded mode, make sure relocalization happen for every frame
+            # in single threaded mode, make sure relocalization happen for every frame
             while config["single_thread"]:
                 with states.lock:
                     if states.reloc_sem.value == 0:
@@ -702,29 +713,25 @@ if __name__ == "__main__":
         if add_new_kf:
             keyframes.append(frame)
             states.queue_global_optimization(len(keyframes) - 1)
-            # In single threaded mode, wait for the backend to finish
+            # in single threaded mode, wait for the backend to finish
             while config["single_thread"]:
                 with states.lock:
                     if len(states.global_optimizer_tasks) == 0:
                         break
                 time.sleep(0.01)
         
-        # Track camera position continuously
-        if args.load_state:  # Only track position when we have a loaded state
+        # track camera position continuously
+        if args.load_state:  # only track position when we have a loaded state
             current_frame = states.get_frame()
             if current_frame is not None:
                 T_WC = current_frame.T_WC
                 translation = T_WC.data[0, :3].cpu().numpy()
-                # Apply coordinate transformations
-                # transformed_translation = transform_coordinates(translation, args) # Removed as per edit hint
-                # Only print position every 15 frames to avoid spam
                 if i % 15 == 0:
                     print(f"📷 LIVE CAMERA POSITION: x={translation[0]:.3f}, y={translation[1]:.3f}, z={translation[2]:.3f}")
                 
-                # Write camera position and orientation to file for calibration script to read
+                # write camera position and orientation to file for calibration script to read
                 try:
-                    import json
-                    # Get camera orientation from current frame
+                    # get camera orientation from current frame
                     current_frame = states.get_frame()
                     if current_frame is not None:
                         T_WC = current_frame.T_WC
@@ -741,12 +748,11 @@ if __name__ == "__main__":
                         with open('camera_position.txt', 'w') as f:
                             json.dump(camera_data, f)
                 except Exception as e:
-                    # Silently fail if we can't write the file
                     pass
                 
-                # Trajectory following mode - only after relocalization
+                # trajectory following mode - only after relocalization
                 if args.follow_traj and trajectory_data is not None:
-                    # Check if we've successfully relocalized
+                    # check if we've successfully relocalized
                     with states.lock:
                         has_relocalized = states.relocalized.value == 1
                     
@@ -758,9 +764,9 @@ if __name__ == "__main__":
                         if nearest_kf_idx is not None and nearest_kf_pose is not None and distance is not None and movement_required is not None and rotation_required is not None:
                             nearest_translation = nearest_kf_pose.data[0, :3].cpu().numpy()
                             
-                            # Get current camera orientation
-                            # Sim3 data format: [quaternion (4), translation (3), scale (1)]
-                            # Extract quaternion and convert to rotation matrix
+                            # get current camera orientation
+                            # sim3 data format: [quaternion (4), translation (3), scale (1)]
+                            # extract quaternion and convert to rotation matrix
                             current_quat = T_WC.data[0, 3:7].cpu().numpy()  # quaternion part
                             target_quat = nearest_kf_pose.data[0, 3:7].cpu().numpy()  # quaternion part
                             
