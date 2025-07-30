@@ -305,6 +305,11 @@ def save_slam_state(save_dir, keyframes, retrieval_database, factor_graph, state
     with open(slam_state_dir / "summary.yaml", 'w') as f:
         yaml.dump(summary, f, default_flow_style=False)
 
+    # save point cloud PLY file
+    print("Saving point cloud PLY file for point clicking...")
+    save_reconstruction(slam_state_dir, "point_cloud.ply", keyframes, 1.5)
+    print(f"Point cloud saved to {slam_state_dir / 'point_cloud.ply'}")
+
     print(f"Saved {len(keyframes)} keyframes, {len(factor_graph.ii)} edges, and complete trajectory")
     print(f"Trajectory spans {summary['processing_stats']['duration']:.2f} seconds")
     print(f"Summary saved to {slam_state_dir / 'summary.yaml'}")
