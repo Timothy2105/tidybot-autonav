@@ -275,13 +275,18 @@ if __name__ == "__main__":
     print("Applying hand-eye calibration transformation to point cloud...")
     transformed_points = apply_transformation_to_points(original_points, np.linalg.inv(T_cam2base))
 
-    # Flip everything on Y-axis (multiply Y coordinates by -1)
-    print("Flipping everything on Y-axis...")
-    transformed_points[:, 1] = -transformed_points[:, 1]  # Flip Y coordinates
+    # Rotate the point cloud 180 degrees around X-axis to view from above
+    print("Rotating point cloud 180° around X-axis for proper viewing orientation...")
+    rotation_180_x = np.array([
+        [1,  0,  0],
+        [0, -1,  0], 
+        [0,  0, -1]
+    ])
+    transformed_points = transformed_points @ rotation_180_x.T
 
     print(f"Transformed point cloud bounds: X[{transformed_points[:, 0].min():.3f}, {transformed_points[:, 0].max():.3f}], "
-          f"Y[{transformed_points[:, 1].min():.3f}, {transformed_points[:, 1].max():.3f}], "
-          f"Z[{transformed_points[:, 2].min():.3f}, {transformed_points[:, 2].max():.3f}]")
+           f"Y[{transformed_points[:, 1].min():.3f}, {transformed_points[:, 1].max():.3f}], "
+           f"Z[{transformed_points[:, 2].min():.3f}, {transformed_points[:, 2].max():.3f}]")
 
     # Collect camera positions for point cloud
     cam_positions = []
@@ -296,9 +301,9 @@ if __name__ == "__main__":
     cam_positions = np.array(cam_positions)
     cam_colors = np.array(cam_colors)
 
-    # Flip camera and wheel positions on Y-axis to match point cloud
-    print("Flipping camera and wheel positions on Y-axis...")
-    cam_positions[:, 1] = -cam_positions[:, 1]
+    # Apply the same rotation to camera positions
+    print("Applying same rotation to camera positions...")
+    cam_positions = cam_positions @ rotation_180_x.T
 
     # Add point clouds to the scene
     print("Adding point clouds to visualization...")
@@ -309,7 +314,7 @@ if __name__ == "__main__":
         "/transformed_pointcloud",
         points=transformed_points,
         colors=original_colors,  # Keep original colors
-        point_size=0.02,  # Smaller for better detail
+        point_size=0.003,  # Smaller for better detail
     )
 
     # Camera positions (blue)
@@ -323,12 +328,25 @@ if __name__ == "__main__":
 
     # Add coordinate frames to help with orientation
     print("Adding coordinate frames...")
-    server.scene.add_frame("/origin", wxyz=np.array([1, 0, 0, 0]), position=np.array([0, 0, 0]), axes_length=1.0, axes_radius=0.02)
+    # Origin frame - rotated to match the point cloud orientation
+    origin_rotation = np.array([0, 0, 1, 0])  # 180° rotation around X-axis in quaternion format
+    server.scene.add_frame("/origin", wxyz=origin_rotation, position=np.array([0, 0, 0]), axes_length=1.0, axes_radius=0.02)
+    
+    # Add a green point at the origin (PLY file world coordinate origin)
+    print("Adding green point at PLY file origin...")
+    origin_point = np.array([[0, 0, 0]])  # Origin coordinates
+    origin_color = np.array([[0, 1, 0]])  # Green color
+    server.scene.add_point_cloud(
+        "/origin_point",
+        points=origin_point,
+        colors=origin_color,
+        point_size=0.1,  # Larger for visibility
+    )
     
     # Add a frame at the center of the transformed point cloud
     transformed_center = np.mean(transformed_points, axis=0)
     print(f"Transformed point cloud center: {transformed_center}")
-    server.scene.add_frame("/transformed_center", wxyz=np.array([1, 0, 0, 0]), position=transformed_center, axes_length=0.5, axes_radius=0.01)
+    server.scene.add_frame("/transformed_center", wxyz=origin_rotation, position=transformed_center, axes_length=0.5, axes_radius=0.01)
 
     print("Visualization started!")
     print("- Main point cloud: PLY points after hand-eye calibration transformation (point_size=0.02)")

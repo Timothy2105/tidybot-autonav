@@ -328,5 +328,4 @@ if __name__ == "__main__":
                               axes_length=0.294, axes_radius=0.01)
       except:
         pass
-      # Add some coordinate frames to the scene. These will be visualized in the viewer.
     time.sleep(0.05)
