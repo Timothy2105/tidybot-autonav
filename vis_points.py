@@ -268,7 +268,7 @@ if __name__ == "__main__":
     print(T_cam2base)
 
     # Load the PLY file
-    ply_file_path = "logs/live_session_20250729_154408_replay.ply"
+    ply_file_path = "saved-states/test-recalib/point_cloud.ply"
     original_points, original_colors = load_ply_file(ply_file_path)
 
     # Apply hand-eye calibration transformation to all points
