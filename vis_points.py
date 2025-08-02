@@ -95,6 +95,57 @@ def apply_transformation_to_points(points, transformation_matrix):
     
     return transformed_points
 
+# some hardcoded eyeballed rotations to align the floor with transformed axes
+def create_final_transformation_matrix(hand_eye_transform):
+    # Y-axis rotation
+    y_angle_rad = np.radians(-25)
+    cos_y = np.cos(y_angle_rad)
+    sin_y = np.sin(y_angle_rad)
+    
+    y_rotation_matrix = np.array([
+        [cos_y,  0, sin_y, 0],
+        [0,      1, 0,     0],
+        [-sin_y, 0, cos_y, 0],
+        [0,      0, 0,     1]
+    ])
+    
+    # Z-axis rotation
+    z_angle_rad = np.radians(12)
+    cos_z = np.cos(z_angle_rad)
+    sin_z = np.sin(z_angle_rad)
+    
+    z_rotation_matrix = np.array([
+        [cos_z, -sin_z, 0, 0],
+        [sin_z,  cos_z, 0, 0],
+        [0,      0,     1, 0],
+        [0,      0,     0, 1]
+    ])
+    
+    # X-axis rotation
+    x_angle_rad = np.radians(-10)
+    cos_x = np.cos(x_angle_rad)
+    sin_x = np.sin(x_angle_rad)
+    
+    x_rotation_matrix = np.array([
+        [1, 0,      0,      0],
+        [0, cos_x, -sin_x,  0],
+        [0, sin_x,  cos_x,  0],
+        [0, 0,      0,      1]
+    ])
+    
+    # up on Y-axis
+    translation_matrix = np.array([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0.3],  # 0.2m translation in Y direction (up)
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ])
+    
+    # Combine transformations: hand_eye_transform @ y_rotation @ z_rotation @ x_rotation @ translation
+    final_transform = hand_eye_transform @ y_rotation_matrix @ z_rotation_matrix @ x_rotation_matrix @ translation_matrix
+    
+    return final_transform
+
 
 if __name__ == "__main__":
     server = viser.ViserServer()
@@ -271,18 +322,16 @@ if __name__ == "__main__":
     ply_file_path = "saved-states/test-recalib/point_cloud.ply"
     original_points, original_colors = load_ply_file(ply_file_path)
 
-    # Apply hand-eye calibration transformation to all points
-    print("Applying hand-eye calibration transformation to point cloud...")
-    transformed_points = apply_transformation_to_points(original_points, np.linalg.inv(T_cam2base))
+    # Keep original points (no rotation)
+    print("Using original PLY points (no rotation)...")
+    transformed_points = original_points
 
-    # Rotate the point cloud 180 degrees around X-axis to view from above
-    print("Rotating point cloud 180° around X-axis for proper viewing orientation...")
-    rotation_180_x = np.array([
-        [1,  0,  0],
-        [0, -1,  0], 
-        [0,  0, -1]
-    ])
-    transformed_points = transformed_points @ rotation_180_x.T
+    # Calculate transformed coordinate frame for reference
+    print("Calculating transformed coordinate frame...")
+    
+    # Apply hand-eye calibration + -30° Y-axis rotation to coordinate frame
+    hand_eye_transform = np.linalg.inv(T_cam2base)
+    transformed_axes = create_final_transformation_matrix(hand_eye_transform)
 
     print(f"Transformed point cloud bounds: X[{transformed_points[:, 0].min():.3f}, {transformed_points[:, 0].max():.3f}], "
            f"Y[{transformed_points[:, 1].min():.3f}, {transformed_points[:, 1].max():.3f}], "
@@ -301,9 +350,9 @@ if __name__ == "__main__":
     cam_positions = np.array(cam_positions)
     cam_colors = np.array(cam_colors)
 
-    # Apply the same rotation to camera positions
-    print("Applying same rotation to camera positions...")
-    cam_positions = cam_positions @ rotation_180_x.T
+    # Apply the same rotation to camera positions - REMOVED (no rotation)
+    # print("Applying same rotation to camera positions...")
+    # cam_positions = cam_positions @ rotation_180_x.T
 
     # Add point clouds to the scene
     print("Adding point clouds to visualization...")
@@ -317,20 +366,30 @@ if __name__ == "__main__":
         point_size=0.003,  # Smaller for better detail
     )
 
-    # Camera positions (blue)
-    print(f"Adding camera positions with {len(cam_positions)} points")
-    server.scene.add_point_cloud(
-        "/camera_points",
-        points=cam_positions,
-        colors=cam_colors,
-        point_size=0.05,  # Smaller for visibility
-    )
+    # Camera positions (blue) - COMMENTED OUT
+    # print(f"Adding camera positions with {len(cam_positions)} points")
+    # server.scene.add_point_cloud(
+    #     "/camera_points",
+    #     points=cam_positions,
+    #     colors=cam_colors,
+    #     point_size=0.05,  # Smaller for visibility
+    # )
 
     # Add coordinate frames to help with orientation
     print("Adding coordinate frames...")
-    # Origin frame - rotated to match the point cloud orientation
-    origin_rotation = np.array([0, 0, 1, 0])  # 180° rotation around X-axis in quaternion format
+    # Origin frame - no rotation
+    origin_rotation = np.array([1, 0, 0, 0])  # Identity quaternion (no rotation)
     server.scene.add_frame("/origin", wxyz=origin_rotation, position=np.array([0, 0, 0]), axes_length=1.0, axes_radius=0.02)
+    
+    # Transformed coordinate frame (hand-eye calibration applied)
+    # Convert rotation matrix to quaternion for viser
+    from scipy.spatial.transform import Rotation as R
+    transformed_rotation = R.from_matrix(transformed_axes[:3, :3]).as_quat()
+    transformed_quaternion = np.array([transformed_rotation[3], transformed_rotation[0], transformed_rotation[1], transformed_rotation[2]])  # wxyz format
+    
+    # Apply the translation part of the transformation
+    transformed_position = transformed_axes[:3, 3]  # Extract translation from 4x4 matrix
+    server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
     
     # Add a green point at the origin (PLY file world coordinate origin)
     print("Adding green point at PLY file origin...")
@@ -343,10 +402,10 @@ if __name__ == "__main__":
         point_size=0.1,  # Larger for visibility
     )
     
-    # Add a frame at the center of the transformed point cloud
-    transformed_center = np.mean(transformed_points, axis=0)
-    print(f"Transformed point cloud center: {transformed_center}")
-    server.scene.add_frame("/transformed_center", wxyz=origin_rotation, position=transformed_center, axes_length=0.5, axes_radius=0.01)
+    # Add a frame at the center of the transformed point cloud - REMOVED
+    # transformed_center = np.mean(transformed_points, axis=0)
+    # print(f"Transformed point cloud center: {transformed_center}")
+    # server.scene.add_frame("/transformed_center", wxyz=origin_rotation, position=transformed_center, axes_length=0.5, axes_radius=0.01)
 
     print("Visualization started!")
     print("- Main point cloud: PLY points after hand-eye calibration transformation (point_size=0.02)")
