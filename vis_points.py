@@ -110,7 +110,7 @@ def create_final_transformation_matrix(hand_eye_transform):
     ])
     
     # Z-axis rotation
-    z_angle_rad = np.radians(12)
+    z_angle_rad = np.radians(-5)
     cos_z = np.cos(z_angle_rad)
     sin_z = np.sin(z_angle_rad)
     
@@ -122,7 +122,7 @@ def create_final_transformation_matrix(hand_eye_transform):
     ])
     
     # X-axis rotation
-    x_angle_rad = np.radians(-10)
+    x_angle_rad = np.radians(-12)
     cos_x = np.cos(x_angle_rad)
     sin_x = np.sin(x_angle_rad)
     
@@ -136,7 +136,7 @@ def create_final_transformation_matrix(hand_eye_transform):
     # up on Y-axis
     translation_matrix = np.array([
         [1, 0, 0, 0],
-        [0, 1, 0, 0.3],  # 0.2m translation in Y direction (up)
+        [0, 1, 0, 0.4],
         [0, 0, 1, 0],
         [0, 0, 0, 1]
     ])
@@ -161,7 +161,7 @@ def create_inverse_transformation_matrix(hand_eye_transform):
 
 if __name__ == "__main__":
     server = viser.ViserServer()
-    server.set_up_direction((0.0, -1.0, 0.0)) 
+    server.set_up_direction((0.0, 1.0, 0.0)) 
 
     # Original data from vis.py
     wheel_start_pose_0 = [0.000, 0.000, 0.0]
@@ -336,7 +336,7 @@ if __name__ == "__main__":
 
     # Keep original points (no rotation)
     print("Using original PLY points (no rotation)...")
-    transformed_points = original_points
+    original_points_display = original_points
 
     # Calculate transformed coordinate frame for reference
     print("Calculating transformed coordinate frame...")
@@ -344,6 +344,16 @@ if __name__ == "__main__":
     # Apply hand-eye calibration + -30° Y-axis rotation to coordinate frame
     hand_eye_transform = np.linalg.inv(T_cam2base)
     transformed_axes = create_final_transformation_matrix(hand_eye_transform)
+
+    # Create transformed point cloud by applying transformation to every point
+    print("Creating transformed point cloud...")
+    transformed_points = apply_transformation_to_points(original_points, transformed_axes)
+    
+    # Debug: Print transformation matrix info
+    print(f"Transformation matrix:")
+    print(f"  Translation: [{transformed_axes[0,3]:.3f}, {transformed_axes[1,3]:.3f}, {transformed_axes[2,3]:.3f}]")
+    print(f"  Rotation matrix:")
+    print(transformed_axes[:3, :3])
 
     print(f"Transformed point cloud bounds: X[{transformed_points[:, 0].min():.3f}, {transformed_points[:, 0].max():.3f}], "
            f"Y[{transformed_points[:, 1].min():.3f}, {transformed_points[:, 1].max():.3f}], "
@@ -369,7 +379,16 @@ if __name__ == "__main__":
     # Add point clouds to the scene
     print("Adding point clouds to visualization...")
     
-    # Only show transformed point cloud (post-calibration)
+    # Show original point cloud
+    print(f"Adding original point cloud with {len(original_points_display)} points")
+    server.scene.add_point_cloud(
+        "/original_pointcloud",
+        points=original_points_display,
+        colors=original_colors,  # Keep original colors
+        point_size=0.003,  # Smaller for better detail
+    )
+    
+    # Show transformed point cloud
     print(f"Adding transformed point cloud with {len(transformed_points)} points")
     server.scene.add_point_cloud(
         "/transformed_pointcloud",
