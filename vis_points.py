@@ -1,50 +1,31 @@
-import random
 import time
 import numpy as np
 import viser
-import math
 import cv2
 from scipy.spatial.transform import Rotation as R
 from plyfile import PlyData
-import pathlib
 
 
 def load_ply_file(ply_path):
-    """
-    Load a .ply file and return points and colors.
-    
-    Args:
-        ply_path (str): Path to the .ply file
-        
-    Returns:
-        tuple: (points, colors) where points is Nx3 array and colors is Nx3 array
-    """
     print(f"Loading PLY file: {ply_path}")
     
-    # Load the PLY file
     plydata = PlyData.read(ply_path)
     
-    # Extract vertex data
     vertices = plydata['vertex']
     
-    # Extract x, y, z coordinates
+    # extract x, y, z coordinates
     points = np.column_stack([vertices['x'], vertices['y'], vertices['z']])
     
-    # Extract RGB colors (normalize to [0, 1])
+    # extract RGB colors (normalize to [0, 1])
     colors = np.column_stack([vertices['red'], vertices['green'], vertices['blue']]) / 255.0
     
     print(f"Loaded {len(points)} points from PLY file")
-    print(f"Point cloud bounds: X[{points[:, 0].min():.3f}, {points[:, 0].max():.3f}], "
-          f"Y[{points[:, 1].min():.3f}, {points[:, 1].max():.3f}], "
-          f"Z[{points[:, 2].min():.3f}, {points[:, 2].max():.3f}]")
     
     return points, colors
 
 
+# convert degrees to rotation matrix for z-axis
 def rotation_matrix_z(degrees):
-    """
-    Converts an angle in degrees around the Z-axis to a 3x3 rotation matrix.
-    """
     radians = np.deg2rad(degrees)
     cos_theta = np.cos(radians)
     sin_theta = np.sin(radians)
@@ -56,48 +37,34 @@ def rotation_matrix_z(degrees):
     ])
     return R_z
 
-
+# convert quaternion to rotation matrix
 def quaternion_wxyz_to_rotation_matrix_scipy(q_wxyz):
-    """
-    Converts a quaternion in (w, x, y, z) format to a 3x3 rotation matrix using SciPy.
-    """
-    # SciPy's Rotation class expects quaternions in (x, y, z, w) format.
     q_xyzw = [q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]]
     
-    # Create a Rotation object from the quaternion
+    # create a Rotation object from quaternion
     rotation = R.from_quat(q_xyzw)
     
-    # Convert the Rotation object to a rotation matrix
+    # convert the Rotation object to rotation matrix
     rotation_matrix = rotation.as_matrix()
     
     return rotation_matrix
 
-
+# apply transformation to points
 def apply_transformation_to_points(points, transformation_matrix):
-    """
-    Apply a 4x4 transformation matrix to a set of 3D points.
-    
-    Args:
-        points (np.ndarray): Nx3 array of points
-        transformation_matrix (np.ndarray): 4x4 transformation matrix
-        
-    Returns:
-        np.ndarray: Nx3 array of transformed points
-    """
-    # Convert points to homogeneous coordinates (Nx4)
+    # convert points to homogeneous coordinates (Nx4)
     points_homogeneous = np.column_stack([points, np.ones(len(points))])
     
-    # Apply transformation
+    # apply transformation
     transformed_points_homogeneous = (transformation_matrix @ points_homogeneous.T).T
     
-    # Convert back to 3D coordinates
+    # convert back to 3D coordinates
     transformed_points = transformed_points_homogeneous[:, :3]
     
     return transformed_points
 
 # some hardcoded eyeballed rotations to align the floor with transformed axes
 def create_final_transformation_matrix(hand_eye_transform):
-    # Y-axis rotation
+    # y-axis rotation
     y_angle_rad = np.radians(-25)
     cos_y = np.cos(y_angle_rad)
     sin_y = np.sin(y_angle_rad)
@@ -109,7 +76,7 @@ def create_final_transformation_matrix(hand_eye_transform):
         [0,      0, 0,     1]
     ])
     
-    # Z-axis rotation
+    # z-axis rotation
     z_angle_rad = np.radians(-5)
     cos_z = np.cos(z_angle_rad)
     sin_z = np.sin(z_angle_rad)
@@ -121,7 +88,7 @@ def create_final_transformation_matrix(hand_eye_transform):
         [0,      0,     0, 1]
     ])
     
-    # X-axis rotation
+    # x-axis rotation
     x_angle_rad = np.radians(-12)
     cos_x = np.cos(x_angle_rad)
     sin_x = np.sin(x_angle_rad)
@@ -133,7 +100,7 @@ def create_final_transformation_matrix(hand_eye_transform):
         [0, 0,      0,      1]
     ])
     
-    # up on Y-axis
+    # up on y-axis
     translation_matrix = np.array([
         [1, 0, 0, 0],
         [0, 1, 0, 0.4],
@@ -141,21 +108,17 @@ def create_final_transformation_matrix(hand_eye_transform):
         [0, 0, 0, 1]
     ])
     
-    # Combine transformations: hand_eye_transform @ y_rotation @ z_rotation @ x_rotation @ translation
+    # combine transformations: hand_eye_transform @ y_rotation @ z_rotation @ x_rotation @ translation
     final_transform = hand_eye_transform @ y_rotation_matrix @ z_rotation_matrix @ x_rotation_matrix @ translation_matrix
     
     return final_transform
 
 
 def create_inverse_transformation_matrix(hand_eye_transform):
-    """
-    Create the inverse transformation matrix that reverses all the transformations.
-    This is the inverse of create_final_transformation_matrix.
-    """
-    # Get the forward transformation matrix
+    # get the forward transformation matrix
     forward_transform = create_final_transformation_matrix(hand_eye_transform)
     
-    # Return the inverse
+    # return inverse
     return np.linalg.inv(forward_transform)
 
 
@@ -163,7 +126,8 @@ if __name__ == "__main__":
     server = viser.ViserServer()
     server.set_up_direction((0.0, 1.0, 0.0)) 
 
-    # Original data from vis.py
+    # original data from vis.py
+    # NOTE: currently using synthetic data for hand-eye calibration
     wheel_start_pose_0 = [0.000, 0.000, 0.0]
     wheel_end_pose_0 = [0.295, 0.000, 22.5]
     cam_start_pose_0 = [1.613, -0.025, 0.658, 0.042132, 0.269313, 0.053504, 0.960642]
@@ -263,58 +227,57 @@ if __name__ == "__main__":
         wheel_start_pose_15, wheel_end_pose_15
     ]
 
-    # Generate synthetic camera data - tilted circle
+    # generate synthetic camera data - tilted circle
     def generate_tilted_circle_cameras():
-        # Circle parameters
+        # circle parameters
         radius = 0.3
-        num_points = len(wheel_poses)  # Match the number of wheel poses (32)
-        slant_angle = 45 * np.pi / 180  # 45 degrees in radians
+        num_points = len(wheel_poses)
+        slant_angle = 45 * np.pi / 180
 
-        # Calculate quaternion for 45-degree rotation around X-axis
-        # For rotation around X-axis: q = [cos(θ/2), sin(θ/2), 0, 0]
+        # calculate quaternion for 45-degree rotation around x-axis
+        # for rotation around x-axis: q = [cos(θ/2), sin(θ/2), 0, 0]
         half_angle = slant_angle / 2
         qw = np.cos(half_angle)
         qx = np.sin(half_angle)
         qy = 0
         qz = 0
 
-        # Generate points
+        # generate points
         points = []
         for i in range(num_points):
-            # Angle for each point (evenly spaced around circle)
+            # angle for each point (evenly spaced around circle)
             angle = 2 * np.pi * i / num_points
             
-            # Initial circle points in XY plane
+            # initial circle points in xy plane
             x_initial = radius * np.cos(angle)
             y_initial = radius * np.sin(angle)
             z_initial = 0
             
-            # Apply 45-degree rotation around X-axis
-            # Rotation matrix for X-axis rotation:
+            # apply 45-degree rotation around x-axis
+            # rotation matrix for x-axis rotation:
             x = x_initial
             y = y_initial * np.cos(slant_angle) - z_initial * np.sin(slant_angle)
             z = y_initial * np.sin(slant_angle) + z_initial * np.cos(slant_angle)
             
-            # Format: [x, y, z, qw, qx, qy, qz]
+            # format: [x, y, z, qw, qx, qy, qz]
             point = [x, y, z, qw, qx, qy, qz]
             points.append(point)
             
-            # Print each point
             print(f"Camera Point {i}: [{x:.4f}, {y:.4f}, {z:.4f}, {qw:.4f}, {qx:.4f}, {qy:.4f}, {qz:.4f}]")
         
         return points
 
-    # Generate synthetic tilted circle camera poses
+    # get synthetic camera poses
     cam_poses = generate_tilted_circle_cameras()
 
-    # Prepare data for hand-eye calibration (same as vis.py)
+    # prepare data for hand-eye calibration (same as vis.py)
     wheel_translations = [np.array([pose[0], pose[1], 0.0]) for pose in wheel_poses]
     wheel_rotations = [rotation_matrix_z(pose[2]) for pose in wheel_poses]
 
     cam_translations = [np.array(pose[0:3]) for pose in cam_poses]
     cam_rotations = [quaternion_wxyz_to_rotation_matrix_scipy(pose[3:]) for pose in cam_poses]
 
-    # Perform hand-eye calibration
+    # perform hand-eye calibration
     print("Performing hand-eye calibration...")
     T_rot, T_trans = cv2.calibrateHandEye(
         R_gripper2base=wheel_rotations,
@@ -330,102 +293,109 @@ if __name__ == "__main__":
     print(f"Hand-eye calibration transformation matrix:")
     print(T_cam2base)
 
-    # Load the PLY file
+    # load the ply file
     ply_file_path = "saved-states/test-recalib/point_cloud.ply"
     original_points, original_colors = load_ply_file(ply_file_path)
 
-    # Keep original points (no rotation)
+    # keep original points (no rotation)
     print("Using original PLY points (no rotation)...")
     original_points_display = original_points
 
-    # Calculate transformed coordinate frame for reference
+    # calculate transformed coordinate frame for reference
     print("Calculating transformed coordinate frame...")
     
-    # Apply hand-eye calibration + -30° Y-axis rotation to coordinate frame
+    # apply hand-eye calibration + -30° y-axis rotation to coordinate frame
     hand_eye_transform = np.linalg.inv(T_cam2base)
     transformed_axes = create_final_transformation_matrix(hand_eye_transform)
 
-    # Create transformed point cloud by applying transformation to every point
+    # create transformed point cloud by applying transformation to every point
     print("Creating transformed point cloud...")
     transformed_points = apply_transformation_to_points(original_points, transformed_axes)
     
-    # Debug: Print transformation matrix info
-    print(f"Transformation matrix:")
-    print(f"  Translation: [{transformed_axes[0,3]:.3f}, {transformed_axes[1,3]:.3f}, {transformed_axes[2,3]:.3f}]")
-    print(f"  Rotation matrix:")
-    print(transformed_axes[:3, :3])
+    # save transformation matrices to calib-results directory
+    print("Saving transformation matrices...")
+    import os
+    calib_results_dir = "calib-results"
+    os.makedirs(calib_results_dir, exist_ok=True)
+    
+    # save final transformation matrix
+    final_transform_path = os.path.join(calib_results_dir, "final_transformation_matrix.npy")
+    np.save(final_transform_path, transformed_axes)
+    print(f"Saved final transformation matrix to: {final_transform_path}")
+    
+    # save inverse transformation matrix
+    inverse_transform = create_inverse_transformation_matrix(hand_eye_transform)
+    inverse_transform_path = os.path.join(calib_results_dir, "inverse_transformation_matrix.npy")
+    np.save(inverse_transform_path, inverse_transform)
+    print(f"Saved inverse transformation matrix to: {inverse_transform_path}")
+    
+    # save as text file
+    final_transform_txt_path = os.path.join(calib_results_dir, "final_transformation_matrix.txt")
+    np.savetxt(final_transform_txt_path, transformed_axes, fmt='%.6f', 
+               header='Final transformation matrix (4x4)\nFormat: [R R R T]\n        [R R R T]\n        [R R R T]\n        [0 0 0 1]')
+    print(f"Saved final transformation matrix (text) to: {final_transform_txt_path}")
+    
+    inverse_transform_txt_path = os.path.join(calib_results_dir, "inverse_transformation_matrix.txt")
+    np.savetxt(inverse_transform_txt_path, inverse_transform, fmt='%.6f',
+               header='Inverse transformation matrix (4x4)\nFormat: [R R R T]\n        [R R R T]\n        [R R R T]\n        [0 0 0 1]')
+    print(f"Saved inverse transformation matrix (text) to: {inverse_transform_txt_path}")
 
     print(f"Transformed point cloud bounds: X[{transformed_points[:, 0].min():.3f}, {transformed_points[:, 0].max():.3f}], "
            f"Y[{transformed_points[:, 1].min():.3f}, {transformed_points[:, 1].max():.3f}], "
            f"Z[{transformed_points[:, 2].min():.3f}, {transformed_points[:, 2].max():.3f}]")
 
-    # Collect camera positions for point cloud
+    # collect camera positions for point cloud
     cam_positions = []
     cam_colors = []
     for i, cam_pose in enumerate(cam_poses):
         cam_position = np.array(cam_pose[0:3])
         cam_positions.append(cam_position)
-        # Use blue color for camera points
-        cam_colors.append([0.0, 0.0, 1.0])  # RGB blue
+        cam_colors.append([0.0, 0.0, 1.0]) # blue
 
-    # Convert to numpy arrays
+    # convert to numpy arrays
     cam_positions = np.array(cam_positions)
     cam_colors = np.array(cam_colors)
 
-    # Apply the same rotation to camera positions - REMOVED (no rotation)
-    # print("Applying same rotation to camera positions...")
-    # cam_positions = cam_positions @ rotation_180_x.T
-
-    # Add point clouds to the scene
+    # add point clouds to the scene
     print("Adding point clouds to visualization...")
     
-    # Show original point cloud
+    # show original point cloud
     print(f"Adding original point cloud with {len(original_points_display)} points")
     server.scene.add_point_cloud(
         "/original_pointcloud",
         points=original_points_display,
-        colors=original_colors,  # Keep original colors
-        point_size=0.003,  # Smaller for better detail
+        colors=original_colors, 
+        point_size=0.003,
     )
     
-    # Show transformed point cloud
+    # show transformed point cloud
     print(f"Adding transformed point cloud with {len(transformed_points)} points")
     server.scene.add_point_cloud(
         "/transformed_pointcloud",
         points=transformed_points,
-        colors=original_colors,  # Keep original colors
-        point_size=0.003,  # Smaller for better detail
+        colors=original_colors,
+        point_size=0.003,
     )
 
-    # Camera positions (blue) - COMMENTED OUT
-    # print(f"Adding camera positions with {len(cam_positions)} points")
-    # server.scene.add_point_cloud(
-    #     "/camera_points",
-    #     points=cam_positions,
-    #     colors=cam_colors,
-    #     point_size=0.05,  # Smaller for visibility
-    # )
-
-    # Add coordinate frames to help with orientation
+    # add coordinate frames to help with orientation
     print("Adding coordinate frames...")
-    # Origin frame - no rotation
-    origin_rotation = np.array([1, 0, 0, 0])  # Identity quaternion (no rotation)
+    # origin frame - no rotation
+    origin_rotation = np.array([1, 0, 0, 0]) # identity quaternion (no rotation)
     server.scene.add_frame("/origin", wxyz=origin_rotation, position=np.array([0, 0, 0]), axes_length=0.8, axes_radius=0.015)
     
-    # Transformed coordinate frame (hand-eye calibration applied)
-    # Convert rotation matrix to quaternion for viser
-    from scipy.spatial.transform import Rotation as R
+    # transformed coordinate frame (hand-eye calibration applied)
+    # convert rotation matrix to quaternion for viser
     transformed_rotation = R.from_matrix(transformed_axes[:3, :3]).as_quat()
     transformed_quaternion = np.array([transformed_rotation[3], transformed_rotation[0], transformed_rotation[1], transformed_rotation[2]])  # wxyz format
     
-    # Apply the translation part of the transformation
-    transformed_position = transformed_axes[:3, 3]  # Extract translation from 4x4 matrix
+    # apply the translation part of the transformation
+    transformed_position = transformed_axes[:3, 3] # extract translation from 4x4 matrix
     server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
     
-    # Add a green point at the origin (PLY file world coordinate origin)
+    # add a green point at the origin (original)
     print("Adding green point at PLY file origin...")
-    origin_point = np.array([[0, 0, 0]])  # Origin coordinates
-    origin_color = np.array([[0, 255, 0]])  # Bright green color (0-255 range)
+    origin_point = np.array([[0, 0, 0]]) # origin coordinates
+    origin_color = np.array([[0, 255, 0]])
     server.scene.add_point_cloud(
         "/origin_point",
         points=origin_point,
@@ -433,50 +403,44 @@ if __name__ == "__main__":
         point_size=0.1,  # Larger for visibility
     )
     
-    # Add a blue point at the transformed origin
+    # add a blue point at the transformed origin
     print("Adding blue point at transformed origin...")
     transformed_origin_point = apply_transformation_to_points(origin_point, transformed_axes)
-    transformed_origin_color = np.array([[255, 0, 0]])  # Bright red color (0-255 range)
+    transformed_origin_color = np.array([[255, 0, 0]]) 
     server.scene.add_point_cloud(
         "/transformed_origin_point",
         points=transformed_origin_point,
         colors=transformed_origin_color,
-        point_size=0.1,  # Larger for visibility
+        point_size=0.1,
     )
     
-    # Add a purple dot at (1, 0, 1) in original coordinate system
+    # add a purple dot at (1, 0, 1) in original coordinate system
     print("Adding purple dot at (1, 0, 1) in original coordinates...")
-    original_test_point = np.array([[1, 0, 1]])  # Point in original coordinate system
-    original_test_color = np.array([[255, 0, 255]])  # Purple color (0-255 range)
+    original_test_point = np.array([[1, 0, 1]]) # point in original coordinate system
+    original_test_color = np.array([[255, 0, 255]]) 
     server.scene.add_point_cloud(
         "/original_test_point",
         points=original_test_point,
         colors=original_test_color,
-        point_size=0.1,  # Larger for visibility
+        point_size=0.1,
     )
     
-    # Show the same point in transformed coordinate system
+    # show the same point in transformed coordinate system
     print("Showing same point in transformed coordinate system...")
     transformed_test_point = apply_transformation_to_points(original_test_point, transformed_axes)
-    transformed_test_color = np.array([[255, 255, 0]])  # Yellow color (0-255 range)
+    transformed_test_color = np.array([[255, 255, 0]])
     server.scene.add_point_cloud(
         "/transformed_test_point",
         points=transformed_test_point,
         colors=transformed_test_color,
-        point_size=0.1,  # Larger for visibility
+        point_size=0.1,
     )
-    
-    # Add a frame at the center of the transformed point cloud - REMOVED
-    # transformed_center = np.mean(transformed_points, axis=0)
-    # print(f"Transformed point cloud center: {transformed_center}")
-    # server.scene.add_frame("/transformed_center", wxyz=origin_rotation, position=transformed_center, axes_length=0.5, axes_radius=0.01)
 
     print("Visualization started!")
     print("- Main point cloud: PLY points after hand-eye calibration transformation (point_size=0.02)")
-    print("- Blue points: Synthetic tilted circle camera positions (45° around X-axis)")
+    print("- Blue points: Synthetic tilted circle camera positions (45° around x-axis)")
     print("- Coordinate frames: Origin (large), transformed center (medium)")
     print(f"Point sizes: Main point cloud=0.02, camera points=0.05")
-    print(f"Try zooming out or moving the camera to see all points!")
 
     while True:
         time.sleep(0.5)
