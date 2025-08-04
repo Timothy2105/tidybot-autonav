@@ -147,6 +147,18 @@ def create_final_transformation_matrix(hand_eye_transform):
     return final_transform
 
 
+def create_inverse_transformation_matrix(hand_eye_transform):
+    """
+    Create the inverse transformation matrix that reverses all the transformations.
+    This is the inverse of create_final_transformation_matrix.
+    """
+    # Get the forward transformation matrix
+    forward_transform = create_final_transformation_matrix(hand_eye_transform)
+    
+    # Return the inverse
+    return np.linalg.inv(forward_transform)
+
+
 if __name__ == "__main__":
     server = viser.ViserServer()
     server.set_up_direction((0.0, -1.0, 0.0)) 
@@ -379,7 +391,7 @@ if __name__ == "__main__":
     print("Adding coordinate frames...")
     # Origin frame - no rotation
     origin_rotation = np.array([1, 0, 0, 0])  # Identity quaternion (no rotation)
-    server.scene.add_frame("/origin", wxyz=origin_rotation, position=np.array([0, 0, 0]), axes_length=1.0, axes_radius=0.02)
+    server.scene.add_frame("/origin", wxyz=origin_rotation, position=np.array([0, 0, 0]), axes_length=0.8, axes_radius=0.015)
     
     # Transformed coordinate frame (hand-eye calibration applied)
     # Convert rotation matrix to quaternion for viser
@@ -394,11 +406,44 @@ if __name__ == "__main__":
     # Add a green point at the origin (PLY file world coordinate origin)
     print("Adding green point at PLY file origin...")
     origin_point = np.array([[0, 0, 0]])  # Origin coordinates
-    origin_color = np.array([[0, 1, 0]])  # Green color
+    origin_color = np.array([[0, 255, 0]])  # Bright green color (0-255 range)
     server.scene.add_point_cloud(
         "/origin_point",
         points=origin_point,
         colors=origin_color,
+        point_size=0.1,  # Larger for visibility
+    )
+    
+    # Add a blue point at the transformed origin
+    print("Adding blue point at transformed origin...")
+    transformed_origin_point = apply_transformation_to_points(origin_point, transformed_axes)
+    transformed_origin_color = np.array([[255, 0, 0]])  # Bright red color (0-255 range)
+    server.scene.add_point_cloud(
+        "/transformed_origin_point",
+        points=transformed_origin_point,
+        colors=transformed_origin_color,
+        point_size=0.1,  # Larger for visibility
+    )
+    
+    # Add a purple dot at (1, 0, 1) in original coordinate system
+    print("Adding purple dot at (1, 0, 1) in original coordinates...")
+    original_test_point = np.array([[1, 0, 1]])  # Point in original coordinate system
+    original_test_color = np.array([[255, 0, 255]])  # Purple color (0-255 range)
+    server.scene.add_point_cloud(
+        "/original_test_point",
+        points=original_test_point,
+        colors=original_test_color,
+        point_size=0.1,  # Larger for visibility
+    )
+    
+    # Show the same point in transformed coordinate system
+    print("Showing same point in transformed coordinate system...")
+    transformed_test_point = apply_transformation_to_points(original_test_point, transformed_axes)
+    transformed_test_color = np.array([[255, 255, 0]])  # Yellow color (0-255 range)
+    server.scene.add_point_cloud(
+        "/transformed_test_point",
+        points=transformed_test_point,
+        colors=transformed_test_color,
         point_size=0.1,  # Larger for visibility
     )
     
