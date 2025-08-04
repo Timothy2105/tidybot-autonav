@@ -2,8 +2,10 @@ import time
 import numpy as np
 import viser
 import cv2
+import argparse
 from scipy.spatial.transform import Rotation as R
 from plyfile import PlyData
+import os
 
 
 def load_ply_file(ply_path):
@@ -62,7 +64,7 @@ def apply_transformation_to_points(points, transformation_matrix):
     
     return transformed_points
 
-# some hardcoded eyeballed rotations to align the floor with transformed axes
+# some hardcoded eyeballed rotations to align transformed point cloud with original axes
 def create_final_transformation_matrix(hand_eye_transform):
     # y-axis rotation
     y_angle_rad = np.radians(-25)
@@ -123,6 +125,12 @@ def create_inverse_transformation_matrix(hand_eye_transform):
 
 
 if __name__ == "__main__":
+    # Add argument parser
+    parser = argparse.ArgumentParser(description="Hand-eye calibration visualization tool")
+    parser.add_argument("--save", action="store_true", 
+                       help="Save transformation matrices to calib-results directory")
+    args = parser.parse_args()
+
     server = viser.ViserServer()
     server.set_up_direction((0.0, 1.0, 0.0)) 
 
@@ -313,32 +321,32 @@ if __name__ == "__main__":
     transformed_points = apply_transformation_to_points(original_points, transformed_axes)
     
     # save transformation matrices to calib-results directory
-    print("Saving transformation matrices...")
-    import os
-    calib_results_dir = "calib-results"
-    os.makedirs(calib_results_dir, exist_ok=True)
-    
-    # save final transformation matrix
-    final_transform_path = os.path.join(calib_results_dir, "final_transformation_matrix.npy")
-    np.save(final_transform_path, transformed_axes)
-    print(f"Saved final transformation matrix to: {final_transform_path}")
-    
-    # save inverse transformation matrix
-    inverse_transform = create_inverse_transformation_matrix(hand_eye_transform)
-    inverse_transform_path = os.path.join(calib_results_dir, "inverse_transformation_matrix.npy")
-    np.save(inverse_transform_path, inverse_transform)
-    print(f"Saved inverse transformation matrix to: {inverse_transform_path}")
-    
-    # save as text file
-    final_transform_txt_path = os.path.join(calib_results_dir, "final_transformation_matrix.txt")
-    np.savetxt(final_transform_txt_path, transformed_axes, fmt='%.6f', 
-               header='Final transformation matrix (4x4)\nFormat: [R R R T]\n        [R R R T]\n        [R R R T]\n        [0 0 0 1]')
-    print(f"Saved final transformation matrix (text) to: {final_transform_txt_path}")
-    
-    inverse_transform_txt_path = os.path.join(calib_results_dir, "inverse_transformation_matrix.txt")
-    np.savetxt(inverse_transform_txt_path, inverse_transform, fmt='%.6f',
-               header='Inverse transformation matrix (4x4)\nFormat: [R R R T]\n        [R R R T]\n        [R R R T]\n        [0 0 0 1]')
-    print(f"Saved inverse transformation matrix (text) to: {inverse_transform_txt_path}")
+    if args.save:
+        print("Saving transformation matrices...")
+        calib_results_dir = "calib-results"
+        os.makedirs(calib_results_dir, exist_ok=True)
+        
+        # save final transformation matrix
+        final_transform_path = os.path.join(calib_results_dir, "final_transformation_matrix.npy")
+        np.save(final_transform_path, transformed_axes)
+        print(f"Saved final transformation matrix to: {final_transform_path}")
+        
+        # save inverse transformation matrix
+        inverse_transform = create_inverse_transformation_matrix(hand_eye_transform)
+        inverse_transform_path = os.path.join(calib_results_dir, "inverse_transformation_matrix.npy")
+        np.save(inverse_transform_path, inverse_transform)
+        print(f"Saved inverse transformation matrix to: {inverse_transform_path}")
+        
+        # save as text file
+        final_transform_txt_path = os.path.join(calib_results_dir, "final_transformation_matrix.txt")
+        np.savetxt(final_transform_txt_path, transformed_axes, fmt='%.6f', 
+                   header='Final transformation matrix (4x4)\nFormat: [R R R T]\n        [R R R T]\n        [R R R T]\n        [0 0 0 1]')
+        print(f"Saved final transformation matrix (text) to: {final_transform_txt_path}")
+        
+        inverse_transform_txt_path = os.path.join(calib_results_dir, "inverse_transformation_matrix.txt")
+        np.savetxt(inverse_transform_txt_path, inverse_transform, fmt='%.6f',
+                   header='Inverse transformation matrix (4x4)\nFormat: [R R R T]\n        [R R R T]\n        [R R R T]\n        [0 0 0 1]')
+        print(f"Saved inverse transformation matrix (text) to: {inverse_transform_txt_path}")
 
     print(f"Transformed point cloud bounds: X[{transformed_points[:, 0].min():.3f}, {transformed_points[:, 0].max():.3f}], "
            f"Y[{transformed_points[:, 1].min():.3f}, {transformed_points[:, 1].max():.3f}], "
@@ -392,55 +400,51 @@ if __name__ == "__main__":
     transformed_position = transformed_axes[:3, 3] # extract translation from 4x4 matrix
     server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
     
-    # add a green point at the origin (original)
-    print("Adding green point at PLY file origin...")
-    origin_point = np.array([[0, 0, 0]]) # origin coordinates
-    origin_color = np.array([[0, 255, 0]])
-    server.scene.add_point_cloud(
-        "/origin_point",
-        points=origin_point,
-        colors=origin_color,
-        point_size=0.1,  # Larger for visibility
-    )
+    # # add a green point at the origin (original)
+    # print("Adding green point at PLY file origin...")
+    # origin_point = np.array([[0, 0, 0]]) # origin coordinates
+    # origin_color = np.array([[0, 255, 0]])
+    # server.scene.add_point_cloud(
+    #     "/origin_point",
+    #     points=origin_point,
+    #     colors=origin_color,
+    #     point_size=0.1,  # Larger for visibility
+    # )
     
-    # add a blue point at the transformed origin
-    print("Adding blue point at transformed origin...")
-    transformed_origin_point = apply_transformation_to_points(origin_point, transformed_axes)
-    transformed_origin_color = np.array([[255, 0, 0]]) 
-    server.scene.add_point_cloud(
-        "/transformed_origin_point",
-        points=transformed_origin_point,
-        colors=transformed_origin_color,
-        point_size=0.1,
-    )
+    # # add a blue point at the transformed origin
+    # print("Adding blue point at transformed origin...")
+    # transformed_origin_point = apply_transformation_to_points(origin_point, transformed_axes)
+    # transformed_origin_color = np.array([[255, 0, 0]]) 
+    # server.scene.add_point_cloud(
+    #     "/transformed_origin_point",
+    #     points=transformed_origin_point,
+    #     colors=transformed_origin_color,
+    #     point_size=0.1,
+    # )
     
-    # add a purple dot at (1, 0, 1) in original coordinate system
-    print("Adding purple dot at (1, 0, 1) in original coordinates...")
-    original_test_point = np.array([[1, 0, 1]]) # point in original coordinate system
-    original_test_color = np.array([[255, 0, 255]]) 
-    server.scene.add_point_cloud(
-        "/original_test_point",
-        points=original_test_point,
-        colors=original_test_color,
-        point_size=0.1,
-    )
+    # # add a purple dot at (1, 0, 1) in original coordinate system
+    # print("Adding purple dot at (1, 0, 1) in original coordinates...")
+    # original_test_point = np.array([[1, 0, 1]]) # point in original coordinate system
+    # original_test_color = np.array([[255, 0, 255]]) 
+    # server.scene.add_point_cloud(
+    #     "/original_test_point",
+    #     points=original_test_point,
+    #     colors=original_test_color,
+    #     point_size=0.1,
+    # )
     
-    # show the same point in transformed coordinate system
-    print("Showing same point in transformed coordinate system...")
-    transformed_test_point = apply_transformation_to_points(original_test_point, transformed_axes)
-    transformed_test_color = np.array([[255, 255, 0]])
-    server.scene.add_point_cloud(
-        "/transformed_test_point",
-        points=transformed_test_point,
-        colors=transformed_test_color,
-        point_size=0.1,
-    )
+    # # show the same point in transformed coordinate system
+    # print("Showing same point in transformed coordinate system...")
+    # transformed_test_point = apply_transformation_to_points(original_test_point, transformed_axes)
+    # transformed_test_color = np.array([[255, 255, 0]])
+    # server.scene.add_point_cloud(
+    #     "/transformed_test_point",
+    #     points=transformed_test_point,
+    #     colors=transformed_test_color,
+    #     point_size=0.1,
+    # )
 
     print("Visualization started!")
-    print("- Main point cloud: PLY points after hand-eye calibration transformation (point_size=0.02)")
-    print("- Blue points: Synthetic tilted circle camera positions (45° around x-axis)")
-    print("- Coordinate frames: Origin (large), transformed center (medium)")
-    print(f"Point sizes: Main point cloud=0.02, camera points=0.05")
 
     while True:
         time.sleep(0.5)
