@@ -3,6 +3,7 @@ import numpy as np
 import viser
 import cv2
 import argparse
+import threading
 from scipy.spatial.transform import Rotation as R
 from plyfile import PlyData
 import os
@@ -384,6 +385,124 @@ if __name__ == "__main__":
         colors=original_colors,
         point_size=0.003,
     )
+
+    # add large invisible sphere to capture clicks
+    print("Adding click handler...")
+    
+    # calculate the bounding box of the transformed point cloud
+    min_bounds = transformed_points.min(axis=0)
+    max_bounds = transformed_points.max(axis=0)
+    center = (min_bounds + max_bounds) / 2
+    diagonal = np.linalg.norm(max_bounds - min_bounds)
+    
+    # create an invisible sphere that encompasses the entire scene
+    click_catcher = server.scene.add_icosphere(
+        "/click_catcher",
+        radius=diagonal,
+        position=center,
+        subdivisions=2,
+        color=(255, 255, 255),
+        opacity=0.0,
+        visible=True
+    )
+    
+    # create GUI elements first
+    with server.gui.add_folder("Coordinate Display"):
+        server.gui.add_markdown(
+            "**Click on points in the transformed point cloud to display their coordinates.**\n\n"
+            "A yellow marker will appear at the clicked point for 3 seconds."
+        )
+        
+        # add a text display for the last clicked coordinate
+        coord_display = server.gui.add_text(
+            "Last clicked coordinate",
+            initial_value="No point clicked yet",
+            disabled=True
+        )
+    
+    # keep track of active marker handles
+    active_marker_handles = {}
+    
+    # add click handler to the invisible sphere
+    @click_catcher.on_click
+    def handle_click(event: viser.SceneNodePointerEvent) -> None:
+        # get the click ray in world coordinates
+        click_origin = np.array(event.ray_origin)
+        click_direction = np.array(event.ray_direction)
+        
+        # find intersection with transformed point cloud
+        # project each point onto the ray and find the closest one
+        if len(transformed_points) > 0:
+            # vector from ray origin to each point
+            point_vectors = transformed_points - click_origin
+            
+            # project each point onto the ray
+            projections = np.dot(point_vectors, click_direction)
+            
+            # only consider points in front of the camera (positive projections)
+            valid_mask = projections > 0
+            
+            if np.any(valid_mask):
+                # calculate the closest point on the ray for each point
+                ray_points = click_origin + projections[:, np.newaxis] * click_direction
+                
+                # calculate distances from each point to its closest point on the ray
+                distances = np.linalg.norm(transformed_points - ray_points, axis=1)
+                
+                # apply the valid mask
+                distances[~valid_mask] = np.inf
+                
+                # find the closest point
+                closest_idx = np.argmin(distances)
+                closest_distance = distances[closest_idx]
+                
+                # only register as a click if the point is close enough to the ray
+                if closest_distance < 0.05: # 5cm threshold
+                    closest_point = transformed_points[closest_idx]
+                    coord_str = f"[{closest_point[0]:.3f}, {closest_point[1]:.3f}, {closest_point[2]:.3f}]"
+                    print(f"🎯 Clicked point coordinates: {coord_str}")
+                    
+                    # update GUI display
+                    coord_display.value = coord_str
+                    
+                    # add a temporary marker at the clicked point
+                    marker_name = f"/clicked_point_{time.time()}"
+                    marker_handle = server.scene.add_point_cloud(
+                        marker_name,
+                        points=np.array([closest_point]),
+                        colors=np.array([[1.0, 1.0, 0.0]]), # yellow marker
+                        point_size=0.02,
+                    )
+                    
+                    # store the marker handle
+                    active_marker_handles[marker_name] = marker_handle
+                    
+                    # remove the marker after 3 seconds
+                    def remove_marker(marker_name_to_remove, handle_to_remove):
+                        time.sleep(3)
+                        try:
+                            # use the handle's remove method
+                            handle_to_remove.remove()
+                            # remove from tracking dictionary
+                            if marker_name_to_remove in active_marker_handles:
+                                del active_marker_handles[marker_name_to_remove]
+                            print(f"✓ Removed marker: {marker_name_to_remove}")
+                        except Exception as e:
+                            print(f"Error removing marker: {e}")
+                    
+                    # start a new thread to remove this marker
+                    removal_thread = threading.Thread(
+                        target=remove_marker, 
+                        args=(marker_name, marker_handle),
+                        daemon=True
+                    )
+                    removal_thread.start()
+                else:
+                    print(f"Click too far from any point (closest distance: {closest_distance:.3f}m)")
+            else:
+                print("Click is behind the camera view")
+    
+    print("Click handler ready! Click on points in the transformed point cloud to see their coordinates.")
 
     # add coordinate frames to help with orientation
     print("Adding coordinate frames...")
