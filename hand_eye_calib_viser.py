@@ -4,9 +4,154 @@ import viser
 import cv2
 import argparse
 import threading
+import json
 from scipy.spatial.transform import Rotation as R
 from plyfile import PlyData
 import os
+
+
+def load_transformation_matrix():
+    transformation_matrix_file = "calib-results/final_transformation_matrix.npy"
+    
+    if os.path.exists(transformation_matrix_file):
+        transformation_matrix = np.load(transformation_matrix_file)
+        print(f"Loaded transformation matrix from {transformation_matrix_file}")
+        return transformation_matrix
+    else:
+        print(f"Transformation matrix not found at {transformation_matrix_file}")
+        print("Run this file with --save first to generate the matrix")
+
+
+def read_camera_position():
+    camera_position_file = "camera_position.txt"
+    
+    if os.path.exists(camera_position_file):
+        with open(camera_position_file, 'r') as f:
+            data = json.load(f)
+            position = np.array([data['x'], data['y'], data['z']])
+            quaternion = data.get('quaternion', [1, 0, 0, 0])
+            timestamp = data.get('timestamp', time.time())
+            
+            return position, quaternion, timestamp
+    return None, None, None
+
+
+def apply_transformation(point, transformation_matrix):
+    if transformation_matrix is None:
+        print("No transformation matrix available, using original coordinates")
+        return point
+    
+    # convert point to homogeneous coordinates
+    point_homogeneous = np.append(point, 1.0)
+    
+    # apply transformation
+    transformed_homogeneous = transformation_matrix @ point_homogeneous
+    
+    # convert back to 3D coordinates
+    transformed_point = transformed_homogeneous[:3]
+    
+    return transformed_point
+
+
+def flatten_point(point):
+    return np.array([point[0], 0.0, point[2]])
+
+
+def calculate_movement(point_a, point_b):
+    if point_a is None or point_b is None:
+        return None
+    
+    # flatten both points
+    flat_a = flatten_point(point_a)
+    flat_b = flatten_point(point_b)
+    
+    # calculate net movement
+    movement = flat_b - flat_a
+    
+    return {
+        'point_a': point_a.tolist(),
+        'point_b': point_b.tolist(),
+        'flat_a': flat_a.tolist(),
+        'flat_b': flat_b.tolist(),
+        'movement': movement.tolist(),
+        'distance': np.linalg.norm([movement[0], movement[2]]),
+        'x_movement': movement[0],
+        'y_movement': movement[1],
+        'z_movement': movement[2]
+    }
+
+
+def save_movement_result(result, filename):
+    with open(filename, 'w') as f:
+        json.dump(result, f, indent=2)
+    print(f"Movement result saved to {filename}")
+
+
+def add_camera_position_dot(server, transformation_matrix):    
+    # read current camera position
+    position, _, _ = read_camera_position()
+    
+    if position is not None:
+        transformed_position = apply_transformation(position, transformation_matrix)
+        
+        # add red dot 
+        server.scene.add_point_cloud(
+            "/camera_position",
+            points=np.array([transformed_position]),
+            colors=np.array([[1.0, 0.0, 0.0]]),
+            point_size=0.05,
+        )
+        
+        print(f"Added red dot at current camera position: {transformed_position}")
+        return transformed_position
+    else:
+        print("Could not read camera position")
+        return None
+
+
+def process_clicked_point(clicked_point, transformation_matrix):
+    # get current camera position
+    current_camera_position, _, _ = read_camera_position()
+    
+    if current_camera_position is None:
+        print("Could not read current camera position from camera_position.txt")
+        print("Make sure main.py is running and writing camera position")
+        return None
+    
+    destination_point = clicked_point
+    
+    print(f"Current Position (Point A): {current_camera_position}")
+    print(f"Destination (Point B): {destination_point}")
+    
+    # apply transformation to current camera position
+    transformed_current = apply_transformation(current_camera_position, transformation_matrix)
+    
+    print(f"Transformed Current Position: {transformed_current}")
+    print(f"Destination (already transformed): {destination_point}")
+    
+    movement_result = calculate_movement(transformed_current, destination_point)
+    
+    if movement_result:
+        print(f"\nMOVEMENT CALCULATION RESULTS:")
+        print(f"   Current Position (Point A): {movement_result['point_a']}")
+        print(f"   Destination (Point B): {movement_result['point_b']}")
+        print(f"   Flattened Current: {movement_result['flat_a']}")
+        print(f"   Flattened Destination: {movement_result['flat_b']}")
+        print(f"   X movement: {movement_result['x_movement']:.3f}m")
+        print(f"   Y movement: {movement_result['y_movement']:.3f}m")
+        print(f"   Z movement: {movement_result['z_movement']:.3f}m")
+        
+        # save result
+        save_movement_result(movement_result, "movement_results.txt")
+        print("Movement calculated and saved!")
+        
+        return {
+            'status': 'movement_calculated',
+            'movement_result': movement_result
+        }
+    else:
+        print("Failed to calculate movement")
+        return None
 
 
 def load_ply_file(ply_path):
@@ -126,14 +271,25 @@ def create_inverse_transformation_matrix(hand_eye_transform):
 
 
 if __name__ == "__main__":
-    # Add argument parser
     parser = argparse.ArgumentParser(description="Hand-eye calibration visualization tool")
     parser.add_argument("--save", action="store_true", 
                        help="Save transformation matrices to calib-results directory")
     args = parser.parse_args()
 
     server = viser.ViserServer()
-    server.set_up_direction((0.0, 1.0, 0.0)) 
+    server.set_up_direction((0.0, 1.0, 0.0))
+    
+    # load transformation matrix for movement calculations
+    print("Loading transformation matrix for movement calculations...")
+    transformation_matrix = load_transformation_matrix()
+    print("Movement calculation system ready!")
+    
+    print("Click any point to calculate movement from current camera position to that destination.")
+    print("Live camera position will be read from camera_position.txt (make sure main.py is running)")
+    
+    # add red dot for current camera position
+    print("Adding red dot for current camera position...")
+    camera_position_dot = add_camera_position_dot(server, transformation_matrix) 
 
     # original data from vis.py
     # NOTE: currently using synthetic data for hand-eye calibration
@@ -369,13 +525,13 @@ if __name__ == "__main__":
     print("Adding point clouds to visualization...")
     
     # show original point cloud
-    print(f"Adding original point cloud with {len(original_points_display)} points")
-    server.scene.add_point_cloud(
-        "/original_pointcloud",
-        points=original_points_display,
-        colors=original_colors, 
-        point_size=0.003,
-    )
+    # print(f"Adding original point cloud with {len(original_points_display)} points")
+    # server.scene.add_point_cloud(
+    #     "/original_pointcloud",
+    #     points=original_points_display,
+    #     colors=original_colors, 
+    #     point_size=0.003,
+    # )
     
     # show transformed point cloud
     print(f"Adding transformed point cloud with {len(transformed_points)} points")
@@ -460,10 +616,13 @@ if __name__ == "__main__":
                 if closest_distance < 0.05: # 5cm threshold
                     closest_point = transformed_points[closest_idx]
                     coord_str = f"[{closest_point[0]:.3f}, {closest_point[1]:.3f}, {closest_point[2]:.3f}]"
-                    print(f"🎯 Clicked point coordinates: {coord_str}")
+                    print(f"Clicked point coordinates: {coord_str}")
                     
                     # update GUI display
                     coord_display.value = coord_str
+                    
+                    # Process clicked point for movement calculation
+                    process_clicked_point(closest_point, transformation_matrix)
                     
                     # add a temporary marker at the clicked point
                     marker_name = f"/clicked_point_{time.time()}"
@@ -479,14 +638,14 @@ if __name__ == "__main__":
                     
                     # remove the marker after 3 seconds
                     def remove_marker(marker_name_to_remove, handle_to_remove):
-                        time.sleep(3)
+                        time.sleep(15)
                         try:
                             # use the handle's remove method
                             handle_to_remove.remove()
                             # remove from tracking dictionary
                             if marker_name_to_remove in active_marker_handles:
                                 del active_marker_handles[marker_name_to_remove]
-                            print(f"✓ Removed marker: {marker_name_to_remove}")
+                            print(f"Removed marker: {marker_name_to_remove}")
                         except Exception as e:
                             print(f"Error removing marker: {e}")
                     
@@ -512,58 +671,15 @@ if __name__ == "__main__":
     
     # transformed coordinate frame (hand-eye calibration applied)
     # convert rotation matrix to quaternion for viser
-    transformed_rotation = R.from_matrix(transformed_axes[:3, :3]).as_quat()
-    transformed_quaternion = np.array([transformed_rotation[3], transformed_rotation[0], transformed_rotation[1], transformed_rotation[2]])  # wxyz format
+    # transformed_rotation = R.from_matrix(transformed_axes[:3, :3]).as_quat()
+    # transformed_quaternion = np.array([transformed_rotation[3], transformed_rotation[0], transformed_rotation[1], transformed_rotation[2]])  # wxyz format
     
     # apply the translation part of the transformation
-    transformed_position = transformed_axes[:3, 3] # extract translation from 4x4 matrix
-    server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
-    
-    # # add a green point at the origin (original)
-    # print("Adding green point at PLY file origin...")
-    # origin_point = np.array([[0, 0, 0]]) # origin coordinates
-    # origin_color = np.array([[0, 255, 0]])
-    # server.scene.add_point_cloud(
-    #     "/origin_point",
-    #     points=origin_point,
-    #     colors=origin_color,
-    #     point_size=0.1,  # Larger for visibility
-    # )
-    
-    # # add a blue point at the transformed origin
-    # print("Adding blue point at transformed origin...")
-    # transformed_origin_point = apply_transformation_to_points(origin_point, transformed_axes)
-    # transformed_origin_color = np.array([[255, 0, 0]]) 
-    # server.scene.add_point_cloud(
-    #     "/transformed_origin_point",
-    #     points=transformed_origin_point,
-    #     colors=transformed_origin_color,
-    #     point_size=0.1,
-    # )
-    
-    # # add a purple dot at (1, 0, 1) in original coordinate system
-    # print("Adding purple dot at (1, 0, 1) in original coordinates...")
-    # original_test_point = np.array([[1, 0, 1]]) # point in original coordinate system
-    # original_test_color = np.array([[255, 0, 255]]) 
-    # server.scene.add_point_cloud(
-    #     "/original_test_point",
-    #     points=original_test_point,
-    #     colors=original_test_color,
-    #     point_size=0.1,
-    # )
-    
-    # # show the same point in transformed coordinate system
-    # print("Showing same point in transformed coordinate system...")
-    # transformed_test_point = apply_transformation_to_points(original_test_point, transformed_axes)
-    # transformed_test_color = np.array([[255, 255, 0]])
-    # server.scene.add_point_cloud(
-    #     "/transformed_test_point",
-    #     points=transformed_test_point,
-    #     colors=transformed_test_color,
-    #     point_size=0.1,
-    # )
+    # transformed_position = transformed_axes[:3, 3] # extract translation from 4x4 matrix
+    # server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
 
     print("Visualization started!")
+    print("Red dot shows current camera position (static)")
 
     while True:
         time.sleep(0.5)
