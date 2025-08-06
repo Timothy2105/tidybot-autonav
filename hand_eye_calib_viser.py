@@ -89,9 +89,35 @@ def save_movement_result(result, filename):
 
 def add_camera_position_dot(server, transformation_matrix):    
     # read current camera position
-    position, _, _ = read_camera_position()
+    position, quaternion, _ = read_camera_position()
     
-    if position is not None:
+    if position is not None and quaternion is not None:
+        # print original camera data
+        print(f"\nOriginal Camera Position: {position}")
+        print(f"Original Camera Quaternion [w,x,y,z]: {quaternion}")
+        
+        # get original rotation matrix (in camera local coordinates)
+        original_rotation = quaternion_wxyz_to_rotation_matrix_scipy(quaternion)
+        print(f"Original Rotation Matrix (3x3) - Camera Local Coordinates:")
+        print(original_rotation)
+        
+        # create 4x4 camera transformation matrix
+        camera_transform = create_camera_transform_matrix(position, quaternion)
+        
+        # apply hand-eye calibration transformation to get world coordinates
+        transformed_camera_matrix = apply_transformation_to_4x4_matrix(camera_transform, transformation_matrix)
+        
+        # extract rotation matrix in world coordinates
+        transformed_rotation, transformed_translation = extract_rotation_and_translation(transformed_camera_matrix)
+        
+        # calculate Euler angles with respect to world coordinate system
+        world_euler = rotation_to_euler(transformed_rotation)
+        print(f"World Euler Angles (around x, y, z) in degrees: {world_euler}")
+        
+        # calculate camera tilt angle relative to world z-axis
+        tilt_angle = get_camera_tilt_angle(transformed_rotation)
+        print(f"Camera tilt angle relative to world z-axis: {tilt_angle:.1f} degrees")
+        
         transformed_position = apply_transformation(position, transformation_matrix)
         
         # add red dot 
@@ -102,7 +128,45 @@ def add_camera_position_dot(server, transformation_matrix):
             point_size=0.05,
         )
         
-        print(f"Added red dot at current camera position: {transformed_position}")
+        # show camera orientation in world coordinates
+        world_quaternion = R.from_matrix(transformed_rotation).as_quat()
+        # [x,y,z,w] to [w,x,y,z] format for viser
+        world_quaternion_wxyz = np.array([world_quaternion[3], world_quaternion[0], world_quaternion[1], world_quaternion[2]])
+        
+        server.scene.add_frame(
+            "/camera_orientation",
+            wxyz=world_quaternion_wxyz,
+            position=transformed_position,
+            axes_length=0.2,
+            axes_radius=0.01,
+        )
+        
+        # test tilt angle
+        tilt_angle_rad = np.radians(tilt_angle)
+        cos_tilt = np.cos(tilt_angle_rad)
+        sin_tilt = np.sin(tilt_angle_rad)
+        
+        # rotation matrix for tilt around y-axis
+        tilt_rotation_matrix = np.array([
+            [cos_tilt,  0, sin_tilt],
+            [0,         1, 0],
+            [-sin_tilt, 0, cos_tilt]
+        ])
+        
+            # convert to quaternion
+        tilt_quaternion = R.from_matrix(tilt_rotation_matrix).as_quat()
+        tilt_quaternion_wxyz = np.array([tilt_quaternion[3], tilt_quaternion[0], tilt_quaternion[1], tilt_quaternion[2]])
+        
+        # add test frame at origin
+        server.scene.add_frame(
+            "/tilt_test_frame",
+            wxyz=tilt_quaternion_wxyz,
+            position=np.array([0, 0, 0]),  
+            axes_length=0.3,
+            axes_radius=0.015,
+        )
+        
+        print(f"Added red dot, orientation frame, and tilt test frame at origin with {tilt_angle:.1f}° tilt")
         return transformed_position
     else:
         print("Could not read camera position")
@@ -111,7 +175,7 @@ def add_camera_position_dot(server, transformation_matrix):
 
 def process_clicked_point(clicked_point, transformation_matrix):
     # get current camera position
-    current_camera_position, _, _ = read_camera_position()
+    current_camera_position, current_quaternion, _ = read_camera_position()
     
     if current_camera_position is None:
         print("Could not read current camera position from camera_position.txt")
@@ -129,6 +193,18 @@ def process_clicked_point(clicked_point, transformation_matrix):
     print(f"Transformed Current Position: {transformed_current}")
     print(f"Destination (already transformed): {destination_point}")
     
+    # get current camera Euler angles and world Euler angles
+    if current_quaternion is not None:
+        current_rotation = quaternion_wxyz_to_rotation_matrix_scipy(current_quaternion)
+        current_euler = rotation_to_euler(current_rotation)
+        print(f"Current Camera Euler Angles (around x, y, z): {current_euler}")
+        
+        # get world Euler angles by applying transformation
+        camera_transform = create_camera_transform_matrix(current_camera_position, current_quaternion)
+        transformed_camera_matrix = apply_transformation_to_4x4_matrix(camera_transform, transformation_matrix)
+        transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
+        world_euler = rotation_to_euler(transformed_rotation)
+    
     movement_result = calculate_movement(transformed_current, destination_point)
     
     if movement_result:
@@ -137,9 +213,10 @@ def process_clicked_point(clicked_point, transformation_matrix):
         print(f"   Destination (Point B): {movement_result['point_b']}")
         print(f"   Flattened Current: {movement_result['flat_a']}")
         print(f"   Flattened Destination: {movement_result['flat_b']}")
-        print(f"   X movement: {movement_result['x_movement']:.3f}m")
-        print(f"   Y movement: {movement_result['y_movement']:.3f}m")
-        print(f"   Z movement: {movement_result['z_movement']:.3f}m")
+        print(f"   World X movement: {movement_result['x_movement']:.3f}m")
+        print(f"   World Y movement: {movement_result['y_movement']:.3f}m")
+        print(f"   World Z movement: {movement_result['z_movement']:.3f}m")
+
         
         # save result
         save_movement_result(movement_result, "movement_results.txt")
@@ -196,6 +273,56 @@ def quaternion_wxyz_to_rotation_matrix_scipy(q_wxyz):
     rotation_matrix = rotation.as_matrix()
     
     return rotation_matrix
+
+
+def rotation_to_euler(rotation_matrix):
+    euler_rad = R.from_matrix(rotation_matrix).as_euler('xyz', degrees=False)
+    euler_deg = np.degrees(euler_rad)
+    return euler_deg
+
+
+def create_camera_transform_matrix(position, quaternion):
+    rotation_matrix = quaternion_wxyz_to_rotation_matrix_scipy(quaternion)
+    
+    # create 4x4 transformation matrix
+    transform_matrix = np.eye(4)
+    transform_matrix[:3, :3] = rotation_matrix
+    transform_matrix[:3, 3] = position
+    
+    return transform_matrix
+
+
+def apply_transformation_to_4x4_matrix(matrix_4x4, transformation_matrix):
+    if transformation_matrix is None:
+        return matrix_4x4
+    
+    # apply transformation: T_new = T_transformation @ T_camera
+    transformed_matrix = transformation_matrix @ matrix_4x4
+    return transformed_matrix
+
+
+def extract_rotation_and_translation(matrix_4x4):
+    rotation_matrix = matrix_4x4[:3, :3]
+    translation = matrix_4x4[:3, 3]
+    return rotation_matrix, translation
+
+
+def get_camera_tilt_angle(rotation_matrix):
+    """Get the angle between camera's z-axis and world's z-axis (up direction)."""
+    # world z-axis (up direction)
+    world_z = np.array([0, 0, 1])
+    
+    # camera's z-axis (third column of rotation matrix)
+    camera_z = rotation_matrix[:, 2]
+    
+    # calculate angle between the two vectors
+    cos_angle = np.dot(camera_z, world_z) / (np.linalg.norm(camera_z) * np.linalg.norm(world_z))
+    cos_angle = np.clip(cos_angle, -1.0, 1.0)  # ensure it's in valid range
+    angle_rad = np.arccos(cos_angle)
+    angle_deg = np.degrees(angle_rad)
+    
+    return angle_deg
+
 
 # apply transformation to points
 def apply_transformation_to_points(points, transformation_matrix):

@@ -5,6 +5,7 @@ saved-states/
 videos/
 calib-results/
 camera_position.txt
+movement_results.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
