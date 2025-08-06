@@ -120,6 +120,8 @@ def add_camera_position_dot(server, transformation_matrix):
         
         transformed_position = apply_transformation(position, transformation_matrix)
         
+
+        
         # add red dot 
         server.scene.add_point_cloud(
             "/camera_position",
@@ -153,13 +155,13 @@ def add_camera_position_dot(server, transformation_matrix):
             [-sin_tilt, 0, cos_tilt]
         ])
         
-            # convert to quaternion
+        # convert to quaternion
         tilt_quaternion = R.from_matrix(tilt_rotation_matrix).as_quat()
         tilt_quaternion_wxyz = np.array([tilt_quaternion[3], tilt_quaternion[0], tilt_quaternion[1], tilt_quaternion[2]])
         
         # add test frame at origin
         server.scene.add_frame(
-            "/tilt_test_frame",
+            "/tilted_axis",
             wxyz=tilt_quaternion_wxyz,
             position=np.array([0, 0, 0]),  
             axes_length=0.3,
@@ -216,7 +218,27 @@ def process_clicked_point(clicked_point, transformation_matrix):
         print(f"   World X movement: {movement_result['x_movement']:.3f}m")
         print(f"   World Y movement: {movement_result['y_movement']:.3f}m")
         print(f"   World Z movement: {movement_result['z_movement']:.3f}m")
-
+        
+        # transform world movement to camera coordinates using tilt angle
+        world_x = movement_result['x_movement']
+        world_z = movement_result['z_movement']  # using z as the second coordinate
+        world_y = movement_result['y_movement']  # y stays the same
+        
+        # get tilt angle from the transformed camera rotation
+        camera_transform = create_camera_transform_matrix(current_camera_position, current_quaternion)
+        transformed_camera_matrix = apply_transformation_to_4x4_matrix(camera_transform, transformation_matrix)
+        transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
+        tilt_angle = get_camera_tilt_angle(transformed_rotation)
+        tilt_rad = np.radians(tilt_angle)
+        
+        # apply 2D rotation transformation (x and z coordinates) - OPPOSITE rotation
+        camera_x = world_x * np.cos(-tilt_rad) + world_z * np.sin(-tilt_rad)
+        camera_z = -world_x * np.sin(-tilt_rad) + world_z * np.cos(-tilt_rad)
+        
+        print(f"   Camera X movement (left + / right -): {camera_x:.3f}m")
+        print(f"   Camera Y movement (up/down): {world_y:.3f}m")
+        print(f"   Camera Z movement (forward + / back -): {camera_z:.3f}m")
+        print(f"   Using tilt angle: {tilt_angle:.1f} degrees")
         
         # save result
         save_movement_result(movement_result, "movement_results.txt")
