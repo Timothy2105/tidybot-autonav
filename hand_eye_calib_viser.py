@@ -240,6 +240,16 @@ def process_clicked_point(clicked_point, transformation_matrix):
         print(f"   Camera Z movement (forward + / back -): {camera_z:.3f}m")
         print(f"   Using tilt angle: {tilt_angle:.1f} degrees")
         
+        # TidyBot commands
+        tidibot_x = camera_x
+        tidibot_y = camera_z 
+        tidibot_theta = 0.0  # degrees
+        
+        print(f"   TidyBot X movement (left + / right -): {tidibot_x:.3f}m")
+        print(f"   TidyBot Y movement (forward + / back -): {tidibot_y:.3f}m")
+        print(f"   TidyBot rotation (theta): {tidibot_theta:.1f} degrees")
+        print(f"   TidyBot command: [{tidibot_y:.3f}, {tidibot_x:.3f}, {tidibot_theta:.1f}]")
+        
         # save result
         save_movement_result(movement_result, "movement_results.txt")
         print("Movement calculated and saved!")
