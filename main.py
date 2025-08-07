@@ -10,6 +10,7 @@ import tqdm
 import yaml
 import json
 import numpy as np
+import os
 from mast3r_slam.global_opt import FactorGraph
 
 from mast3r_slam.config import load_config, config, set_global_config
@@ -28,6 +29,70 @@ from mast3r_slam.visualization import WindowMsg, run_visualization
 from mast3r_slam.robot_interface import RobotInterface
 import torch.multiprocessing as mp
 import os
+
+
+class RobotCommandSender:    
+    def __init__(self):
+        self.command_file = "robot_commands.txt"
+        self.result_file = "robot_results.txt"
+    
+    def send_command(self, command):
+        try:
+            with open(self.command_file, 'w') as f:
+                json.dump(command, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error sending command: {e}")
+            return False
+    
+    def read_result(self, timeout=10.0):
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                if os.path.exists(self.result_file):
+                    with open(self.result_file, 'r') as f:
+                        content = f.read().strip()
+                        if content:
+                            # clear the file after reading
+                            with open(self.result_file, 'w') as f:
+                                f.write("")
+                            return json.loads(content)
+            except Exception as e:
+                print(f"Error reading result: {e}")
+            time.sleep(0.1)
+        return None
+    
+    def move_to_waypoint(self, target_pose, threshold_pos=0.01, threshold_theta=0.01, max_steps=100):
+        command = {
+            'type': 'move_to_waypoint',
+            'target_pose': target_pose.tolist(),
+            'threshold_pos': threshold_pos,
+            'threshold_theta': threshold_theta,
+            'max_steps': max_steps
+        }
+        
+        if self.send_command(command):
+            result = self.read_result()
+            if result:
+                return result.get('success', False)
+        return False
+    
+    def get_pose(self):
+        command = {'type': 'get_pose'}
+        
+        if self.send_command(command):
+            result = self.read_result()
+            if result and result.get('success', False):
+                return np.array(result.get('pose', [0, 0, 0]))
+        return np.array([0, 0, 0])
+    
+    def reset(self):
+        command = {'type': 'reset'}
+        
+        if self.send_command(command):
+            result = self.read_result()
+            return result.get('success', False) if result else False
+        return False
 
 
 def find_nearest_keyframe(current_pose, trajectory_data, keyframes, original_kf_count=None):
@@ -569,9 +634,14 @@ if __name__ == "__main__":
     
     # initialize robot interface
     robot_interface = None
+    robot_command_sender = None
     if args.send_cmd:
         simulate = args.simulate_robot
-        robot_interface = RobotInterface(simulate=simulate)
+        if args.use_command_server:
+            robot_command_sender = RobotCommandSender()
+            print(f"Robot command sender initialized (will send commands to send_cmd.py)")
+        else:
+            robot_interface = RobotInterface(simulate=simulate)
         print(f"Robot interface initialized (simulate={simulate})")
 
     # load prediction data
@@ -681,19 +751,19 @@ if __name__ == "__main__":
             
             # check if we just successfully relocalized (tracking after reloc)
             if (args.follow_traj or args.calib_robot) and not has_relocalized:
-                print(f"🔍 MAIN: In TRACKING mode, checking for relocalization (has_relocalized={has_relocalized})")
+                print(f" In TRACKING mode, checking for relocalization (has_relocalized={has_relocalized})")
                 # check if the backend relocalized
                 with keyframes.lock:
                     flag_value = keyframes.relocalized_flag.value
-                    print(f"🔍 MAIN: Checking relocalized_flag.value = {flag_value}")
+                    print(f" Checking relocalized_flag.value = {flag_value}")
                     if flag_value == 1:
                         with states.lock:
                             states.relocalized.value = 1
                         has_relocalized = True
-                        print("🎯 RELOCALIZATION DETECTED - Starting post-relocalization action!")
+                        print(" Relocalization detected - Starting post-relocalization action!")
                         # reset flag
                         keyframes.relocalized_flag.value = 0
-                        print("🔧 MAIN: Reset relocalized_flag to 0")
+                        print(" Reset relocalized_flag to 0")
 
         elif mode == Mode.RELOC:
             X, C = mast3r_inference_mono(model, frame)
@@ -959,15 +1029,38 @@ if __name__ == "__main__":
                                 # Close robot interface
                                 robot_interface.close()
                             
-                            # Save target keyframe image for visualization
-                            import os
-                            import cv2
-                            
-                            # Create follow-traj folder if it doesn't exist
+                            # send command to robot command server if enabled
+                            if args.send_cmd and robot_command_sender is not None:
+                                print("SENDING COMMAND TO ROBOT COMMAND SERVER...")
+                                
+                                # convert to radians for robot
+                                rotation_rad = np.radians(tidybot_rotation_deg)
+                                
+                                # create target pose for robot
+                                target_pose = np.array([tidybot_y, tidybot_x, rotation_rad])
+                                
+                                # send command to the command server
+                                print("Starting robot movement via command server...")
+                                success = robot_command_sender.move_to_waypoint(
+                                    target_pose, 
+                                    threshold_pos=0.01,  # 1cm position threshold
+                                    threshold_theta=0.01,  # ~0.6 degrees rotation threshold
+                                    max_steps=100
+                                )
+                                
+                                if success:
+                                    print(" Robot successfully reached target position via command server!")
+                                    # get final position for verification
+                                    final_pose = robot_command_sender.get_pose()
+                                    print(f"Final robot position: [x={final_pose[0]:.3f}, y={final_pose[1]:.3f}, theta={np.degrees(final_pose[2]):.1f}°]")
+                                else:
+                                    print(" Robot failed to reach target position via command server")
+
+                            # save target keyframe image for visualization
                             follow_traj_dir = "follow-traj"
                             os.makedirs(follow_traj_dir, exist_ok=True)
                             
-                            # Get the target keyframe image
+                            # get the target keyframe image
                             target_keyframe = keyframes[nearest_kf_idx]
                             target_img = target_keyframe.uimg.numpy()  # Get the image as numpy array
                             
@@ -1068,3 +1161,5 @@ if __name__ == "__main__":
     # Clean up robot interface
     if robot_interface is not None:
         robot_interface.close()
+    if robot_command_sender is not None:
+        print("Robot command sender cleanup complete")

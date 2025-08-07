@@ -24,15 +24,42 @@ def load_transformation_matrix():
 
 def read_camera_position():
     camera_position_file = "camera_position.txt"
+    max_retries = 100 
+    retry_count = 0
     
-    if os.path.exists(camera_position_file):
-        with open(camera_position_file, 'r') as f:
-            data = json.load(f)
-            position = np.array([data['x'], data['y'], data['z']])
-            quaternion = data.get('quaternion', [1, 0, 0, 0])
-            timestamp = data.get('timestamp', time.time())
-            
-            return position, quaternion, timestamp
+    while retry_count < max_retries:
+        if os.path.exists(camera_position_file):
+            try:
+                with open(camera_position_file, 'r') as f:
+                    content = f.read().strip()
+                    if not content:  # File is empty
+                        retry_count += 1
+                        time.sleep(0.01)  # Small delay before retry
+                        continue
+                    
+                    data = json.loads(content)
+                    position = np.array([data['x'], data['y'], data['z']])
+                    quaternion = data.get('quaternion', [1, 0, 0, 0])
+                    timestamp = data.get('timestamp', time.time())
+                    
+                    return position, quaternion, timestamp
+            except (json.JSONDecodeError, KeyError, ValueError, OSError) as e:
+                # Keep retrying on any error
+                retry_count += 1
+                time.sleep(0.01)  # Small delay before retry
+                continue
+            except Exception as e:
+                # Keep retrying on any other error
+                retry_count += 1
+                time.sleep(0.01)  # Small delay before retry
+                continue
+        else:
+            # File doesn't exist, wait a bit and retry
+            retry_count += 1
+            time.sleep(0.01)  # Small delay before retry
+            continue
+    
+    # If we've exhausted all retries, return None
     return None, None, None
 
 
@@ -87,6 +114,25 @@ def save_movement_result(result, filename):
     print(f"Movement result saved to {filename}")
 
 
+def send_tidybot_command(tidybot_command):
+    command_file = "robot_commands.txt"
+    
+    # Format: {'type': 'tidybot_command', 'command': [y, x, theta]}
+    command = {
+        'type': 'tidybot_command',
+        'command': tidybot_command
+    }
+    
+    try:
+        with open(command_file, 'w') as f:
+            json.dump(command, f, indent=2)
+        print(f"Command sent to send_cmd.py: {command}")
+        return True
+    except Exception as e:
+        print(f"Error sending command: {e}")
+        return False
+
+
 def add_camera_position_dot(server, transformation_matrix):    
     # read current camera position
     position, quaternion, _ = read_camera_position()
@@ -130,19 +176,6 @@ def add_camera_position_dot(server, transformation_matrix):
             point_size=0.05,
         )
         
-        # show camera orientation in world coordinates
-        world_quaternion = R.from_matrix(transformed_rotation).as_quat()
-        # [x,y,z,w] to [w,x,y,z] format for viser
-        world_quaternion_wxyz = np.array([world_quaternion[3], world_quaternion[0], world_quaternion[1], world_quaternion[2]])
-        
-        server.scene.add_frame(
-            "/camera_orientation",
-            wxyz=world_quaternion_wxyz,
-            position=transformed_position,
-            axes_length=0.2,
-            axes_radius=0.01,
-        )
-        
         # test tilt angle
         tilt_angle_rad = np.radians(tilt_angle)
         cos_tilt = np.cos(tilt_angle_rad)
@@ -168,7 +201,7 @@ def add_camera_position_dot(server, transformation_matrix):
             axes_radius=0.015,
         )
         
-        print(f"Added red dot, orientation frame, and tilt test frame at origin with {tilt_angle:.1f}° tilt")
+        print(f"Added red dot and tilt test frame at origin with {tilt_angle:.1f}° tilt")
         return transformed_position
     else:
         print("Could not read camera position")
@@ -241,14 +274,21 @@ def process_clicked_point(clicked_point, transformation_matrix):
         print(f"   Using tilt angle: {tilt_angle:.1f} degrees")
         
         # TidyBot commands
-        tidibot_x = camera_x
-        tidibot_y = camera_z 
-        tidibot_theta = 0.0  # degrees
+        tidybot_x = camera_x
+        tidybot_y = camera_z 
+        tidybot_theta = 0.0  # degrees
         
-        print(f"   TidyBot X movement (left + / right -): {tidibot_x:.3f}m")
-        print(f"   TidyBot Y movement (forward + / back -): {tidibot_y:.3f}m")
-        print(f"   TidyBot rotation (theta): {tidibot_theta:.1f} degrees")
-        print(f"   TidyBot command: [{tidibot_y:.3f}, {tidibot_x:.3f}, {tidibot_theta:.1f}]")
+        print(f"   TidyBot X movement (left + / right -): {tidybot_x:.3f}m")
+        print(f"   TidyBot Y movement (forward + / back -): {tidybot_y:.3f}m")
+        print(f"   TidyBot rotation (theta): {tidybot_theta:.1f} degrees")
+        print(f"   TidyBot command: [{tidybot_y:.3f}, {tidybot_x:.3f}, {tidybot_theta:.1f}]")
+        
+        # send command to send_cmd.py
+        tidybot_command = [tidybot_y, tidybot_x, tidybot_theta]
+        if send_tidybot_command(tidybot_command):
+            print(" TidyBot command sent successfully!")
+        else:
+            print(" Failed to send TidyBot command")
         
         # save result
         save_movement_result(movement_result, "movement_results.txt")
@@ -738,9 +778,42 @@ if __name__ == "__main__":
     # keep track of active marker handles
     active_marker_handles = {}
     
+    # state management for sequential movements
+    robot_moving = False
+    last_command_time = 0
+    
+    def check_robot_status():
+        global robot_moving
+        try:
+            if os.path.exists("robot_results.txt"):
+                with open("robot_results.txt", 'r') as f:
+                    content = f.read().strip()
+                    if content:
+                        result = json.loads(content)
+                        if result.get('success', False):
+                            with open("robot_results.txt", 'w') as f:
+                                f.write("")
+                            robot_moving = False
+                            print("Robot movement completed!")
+                            return True
+        except Exception as e:
+            pass
+        return False
+    
     # add click handler to the invisible sphere
     @click_catcher.on_click
     def handle_click(event: viser.SceneNodePointerEvent) -> None:
+        global robot_moving, last_command_time
+        
+        # check if robot is currently moving
+        if robot_moving:
+            # check if robot has finished moving
+            if check_robot_status():
+                print("Ready for next click!")
+            else:
+                print("Robot is still moving, please wait...")
+                return
+        
         # get the click ray in world coordinates
         click_origin = np.array(event.ray_origin)
         click_direction = np.array(event.ray_direction)
@@ -838,7 +911,125 @@ if __name__ == "__main__":
     # server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
 
     print("Visualization started!")
-    print("Red dot shows current camera position (static)")
+    print("Red dot shows current camera position (updates every 2 seconds)")
+
+    # continuous camera position tracking
+    last_camera_position = None
+    camera_dot_handle = None
+    camera_orientation_handle = None
+    tilted_axis_handle = None
+    
+    def update_camera_position():
+        global last_camera_position, camera_dot_handle, camera_orientation_handle, tilted_axis_handle
+        
+        try:
+            # read current camera position
+            position, quaternion, _ = read_camera_position()
+            
+            if position is not None and quaternion is not None:
+                # apply transformation to get world coordinates
+                transformed_position = apply_transformation(position, transformation_matrix)
+                
+                if (last_camera_position is None or 
+                    np.linalg.norm(transformed_position - last_camera_position) > 0.01):
+                    
+                    if camera_dot_handle is not None:
+                        try:
+                            camera_dot_handle.remove()
+                        except:
+                            pass
+                    
+                    if camera_orientation_handle is not None:
+                        try:
+                            camera_orientation_handle.remove()
+                        except:
+                            pass
+                    
+                    if tilted_axis_handle is not None:
+                        try:
+                            tilted_axis_handle.remove()
+                        except:
+                            pass
+                    
+                    # add new red dot at updated position
+                    camera_dot_handle = server.scene.add_point_cloud(
+                        "/camera_position",
+                        points=np.array([transformed_position]),
+                        colors=np.array([[1.0, 0.0, 0.0]]),
+                        point_size=0.05,
+                    )
+                    
+                    # create 4x4 camera transformation matrix
+                    camera_transform = create_camera_transform_matrix(position, quaternion)
+                    
+                    # apply hand-eye calibration transformation to get world coordinates
+                    transformed_camera_matrix = apply_transformation_to_4x4_matrix(camera_transform, transformation_matrix)
+                    
+                    # extract rotation matrix in world coordinates
+                    transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
+                    
+                    # show camera orientation in world coordinates
+                    world_quaternion = R.from_matrix(transformed_rotation).as_quat()
+                    # [x,y,z,w] to [w,x,y,z] format
+                    world_quaternion_wxyz = np.array([world_quaternion[3], world_quaternion[0], world_quaternion[1], world_quaternion[2]])
+                    
+                    camera_orientation_handle = server.scene.add_frame(
+                        "/camera_orientation",
+                        wxyz=world_quaternion_wxyz,
+                        position=transformed_position,
+                        axes_length=0.2,
+                        axes_radius=0.01,
+                    )
+                    
+                    # calculate and update tilt angle
+                    tilt_angle = get_camera_tilt_angle(transformed_rotation)
+                    
+                    # create tilted axis frame at origin
+                    tilt_angle_rad = np.radians(tilt_angle)
+                    cos_tilt = np.cos(tilt_angle_rad)
+                    sin_tilt = np.sin(tilt_angle_rad)
+                    
+                    # rotation matrix for tilt around y-axis
+                    tilt_rotation_matrix = np.array([
+                        [cos_tilt,  0, sin_tilt],
+                        [0,         1, 0],
+                        [-sin_tilt, 0, cos_tilt]
+                    ])
+                    
+                    # convert to quaternion
+                    tilt_quaternion = R.from_matrix(tilt_rotation_matrix).as_quat()
+                    tilt_quaternion_wxyz = np.array([tilt_quaternion[3], tilt_quaternion[0], tilt_quaternion[1], tilt_quaternion[2]])
+                    
+                    tilted_axis_handle = server.scene.add_frame(
+                        "/tilted_axis",
+                        wxyz=tilt_quaternion_wxyz,
+                        position=np.array([0, 0, 0]),  
+                        axes_length=0.3,
+                        axes_radius=0.015,
+                    )
+                    
+                    last_camera_position = transformed_position
+                    print(f"Camera position, orientation, and tilt angle ({tilt_angle:.1f}°) updated: {transformed_position}")
+        except Exception as e:
+            if hasattr(update_camera_position, 'last_error_time'):
+                if time.time() - update_camera_position.last_error_time > 5.0: 
+                    print(f"Error in update_camera_position (continuing...): {e}")
+                    update_camera_position.last_error_time = time.time()
+            else:
+                update_camera_position.last_error_time = time.time()
+                print(f"Error in update_camera_position (continuing...): {e}")
 
     while True:
-        time.sleep(0.5)
+        # update camera position every 2 seconds
+        update_camera_position()
+        
+        # check robot status if it's moving
+        if robot_moving:
+            # check for timeout
+            if time.time() - last_command_time > 30:
+                print("Robot movement timeout - assuming completed")
+                robot_moving = False
+            else:
+                check_robot_status()
+        
+        time.sleep(1.0)
