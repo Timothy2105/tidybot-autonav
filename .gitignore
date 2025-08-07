@@ -7,6 +7,7 @@ calib-results/
 camera_position.txt
 movement_results.txt
 robot_results.txt
+robot_commands.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

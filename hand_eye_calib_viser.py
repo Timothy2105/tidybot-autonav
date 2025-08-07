@@ -161,8 +161,8 @@ def add_camera_position_dot(server, transformation_matrix):
         print(f"World Euler Angles (around x, y, z) in degrees: {world_euler}")
         
         # calculate camera tilt angle relative to world z-axis
-        tilt_angle = get_camera_tilt_angle(transformed_rotation)
-        print(f"Camera tilt angle relative to world z-axis: {tilt_angle:.1f} degrees")
+        signed_yaw, _ = get_camera_yaw_angle(transformed_rotation)
+        print(f"Camera yaw relative to world z-axis: {signed_yaw:.1f} degrees")
         
         transformed_position = apply_transformation(position, transformation_matrix)
         
@@ -177,9 +177,9 @@ def add_camera_position_dot(server, transformation_matrix):
         )
         
         # test tilt angle
-        tilt_angle_rad = np.radians(tilt_angle)
-        cos_tilt = np.cos(tilt_angle_rad)
-        sin_tilt = np.sin(tilt_angle_rad)
+        yaw_rad = np.radians(signed_yaw)
+        cos_tilt = np.cos(yaw_rad)
+        sin_tilt = np.sin(yaw_rad)
         
         # rotation matrix for tilt around y-axis
         tilt_rotation_matrix = np.array([
@@ -194,14 +194,14 @@ def add_camera_position_dot(server, transformation_matrix):
         
         # add test frame at origin
         server.scene.add_frame(
-            "/tilted_axis",
+            "/yaw_axis",
             wxyz=tilt_quaternion_wxyz,
             position=np.array([0, 0, 0]),  
             axes_length=0.3,
             axes_radius=0.015,
         )
         
-        print(f"Added red dot and tilt test frame at origin with {tilt_angle:.1f}° tilt")
+        print(f"Added red dot and tilt test frame at origin with {yaw_rad:.1f}° tilt")
         return transformed_position
     else:
         print("Could not read camera position")
@@ -257,21 +257,21 @@ def process_clicked_point(clicked_point, transformation_matrix):
         world_z = movement_result['z_movement']  # using z as the second coordinate
         world_y = movement_result['y_movement']  # y stays the same
         
-        # get tilt angle from the transformed camera rotation
+        # get tilt angle from the transformed camera rotation using signed yaw
         camera_transform = create_camera_transform_matrix(current_camera_position, current_quaternion)
         transformed_camera_matrix = apply_transformation_to_4x4_matrix(camera_transform, transformation_matrix)
         transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
-        tilt_angle = get_camera_tilt_angle(transformed_rotation)
-        tilt_rad = np.radians(tilt_angle)
+        signed_yaw, _ = get_camera_yaw_angle(transformed_rotation, forward_is_neg_z=False)
+        yaw_rad = np.radians(signed_yaw)
         
         # apply 2D rotation transformation (x and z coordinates) - OPPOSITE rotation
-        camera_x = world_x * np.cos(-tilt_rad) + world_z * np.sin(-tilt_rad)
-        camera_z = -world_x * np.sin(-tilt_rad) + world_z * np.cos(-tilt_rad)
+        camera_x =  world_x * np.cos(-yaw_rad) + world_z * np.sin(-yaw_rad)
+        camera_z = -world_x * np.sin(-yaw_rad) + world_z * np.cos(-yaw_rad)
         
         print(f"   Camera X movement (left + / right -): {camera_x:.3f}m")
         print(f"   Camera Y movement (up/down): {world_y:.3f}m")
         print(f"   Camera Z movement (forward + / back -): {camera_z:.3f}m")
-        print(f"   Using tilt angle: {tilt_angle:.1f} degrees")
+        print(f"   Using tilt angle: {yaw_rad:.1f} degrees")
         
         # TidyBot commands
         tidybot_x = camera_x
@@ -379,21 +379,29 @@ def extract_rotation_and_translation(matrix_4x4):
     return rotation_matrix, translation
 
 
-def get_camera_tilt_angle(rotation_matrix):
-    """Get the angle between camera's z-axis and world's z-axis (up direction)."""
-    # world z-axis (up direction)
-    world_z = np.array([0, 0, 1])
-    
-    # camera's z-axis (third column of rotation matrix)
-    camera_z = rotation_matrix[:, 2]
-    
-    # calculate angle between the two vectors
-    cos_angle = np.dot(camera_z, world_z) / (np.linalg.norm(camera_z) * np.linalg.norm(world_z))
-    cos_angle = np.clip(cos_angle, -1.0, 1.0)  # ensure it's in valid range
-    angle_rad = np.arccos(cos_angle)
-    angle_deg = np.degrees(angle_rad)
-    
-    return angle_deg
+def get_camera_yaw_angle(R_cw, forward_is_neg_z=False):
+    # get signed yaw between camera +z and world +z
+    f = R_cw[:, 2]
+    if forward_is_neg_z:
+        f = -f
+
+    # project onto world XZ plane
+    f_proj = np.array([f[0], 0.0, f[2]])
+    n = np.linalg.norm(f_proj)
+    if n < 1e-8:
+        # looking straight up/down -> yaw undefined
+        return 0.0, 0.0
+    f_proj /= n
+
+    # components along +X and +Z
+    fx, fz = f_proj[0], f_proj[2]
+
+    signed_deg = np.degrees(np.arctan2(fx, fz))          # -180, 180
+    full_deg   = signed_deg % 360.0                      # 0, 360
+
+    if signed_deg > 180.0:
+        signed_deg -= 360.0
+    return signed_deg, full_deg
 
 
 # apply transformation to points
@@ -981,13 +989,12 @@ if __name__ == "__main__":
                         axes_radius=0.01,
                     )
                     
-                    # calculate and update tilt angle
-                    tilt_angle = get_camera_tilt_angle(transformed_rotation)
-                    
-                    # create tilted axis frame at origin
-                    tilt_angle_rad = np.radians(tilt_angle)
-                    cos_tilt = np.cos(tilt_angle_rad)
-                    sin_tilt = np.sin(tilt_angle_rad)
+                    # calculate and update tilt angle using signed yaw
+                    signed_yaw, _ = get_camera_yaw_angle(transformed_rotation, forward_is_neg_z=False)
+                    yaw_rad = np.radians(signed_yaw)
+
+                    cos_tilt = np.cos(yaw_rad)
+                    sin_tilt = np.sin(yaw_rad)
                     
                     # rotation matrix for tilt around y-axis
                     tilt_rotation_matrix = np.array([
@@ -1009,7 +1016,7 @@ if __name__ == "__main__":
                     )
                     
                     last_camera_position = transformed_position
-                    print(f"Camera position, orientation, and tilt angle ({tilt_angle:.1f}°) updated: {transformed_position}")
+                    print(f"Camera position, orientation, and tilt angle ({signed_yaw:.1f}°) updated: {transformed_position}")
         except Exception as e:
             if hasattr(update_camera_position, 'last_error_time'):
                 if time.time() - update_camera_position.last_error_time > 5.0: 
