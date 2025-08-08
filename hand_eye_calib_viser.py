@@ -271,7 +271,7 @@ def process_clicked_point(clicked_point, transformation_matrix):
         print(f"   Camera X movement (left + / right -): {camera_x:.3f}m")
         print(f"   Camera Y movement (up/down): {world_y:.3f}m")
         print(f"   Camera Z movement (forward + / back -): {camera_z:.3f}m")
-        print(f"   Using tilt angle: {yaw_rad:.1f} degrees")
+        print(f"   Using tilt angle: {signed_yaw:.1f} degrees")
         
         # TidyBot commands
         tidybot_x = camera_x
@@ -1008,7 +1008,7 @@ if __name__ == "__main__":
                     tilt_quaternion_wxyz = np.array([tilt_quaternion[3], tilt_quaternion[0], tilt_quaternion[1], tilt_quaternion[2]])
                     
                     tilted_axis_handle = server.scene.add_frame(
-                        "/tilted_axis",
+                        "/yaw_axis",
                         wxyz=tilt_quaternion_wxyz,
                         position=np.array([0, 0, 0]),  
                         axes_length=0.3,
