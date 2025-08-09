@@ -9,6 +9,42 @@ from scipy.spatial.transform import Rotation as R
 from plyfile import PlyData
 import os
 
+# baseline yaw file path
+INITIAL_YAW_FILE = "initial_yaw.txt"
+
+
+def save_initial_yaw_to_file(yaw_deg, path = INITIAL_YAW_FILE):
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w") as f:
+            f.write(f"{yaw_deg:.6f}\n")
+        print(f"Saved initial yaw {yaw_deg:.2f} deg to {path}")
+        return True
+    except Exception as e:
+        print(f"Failed to save initial yaw: {e}")
+        return False
+
+
+def load_initial_yaw_from_file(path = INITIAL_YAW_FILE):
+    try:
+        if not os.path.exists(path):
+            return None
+        with open(path, "r") as f:
+            content = f.read().strip()
+            if not content:
+                return None
+            return float(content)
+    except Exception:
+        return None
+
+# return existing value, otherwise save and return it
+def ensure_initial_yaw_saved(yaw_candidate_deg):
+    existing = load_initial_yaw_from_file()
+    if existing is None:
+        save_initial_yaw_to_file(yaw_candidate_deg)
+        return yaw_candidate_deg
+    return existing
+
 
 def load_transformation_matrix():
     transformation_matrix_file = "calib-results/final_transformation_matrix.npy"
@@ -164,6 +200,9 @@ def add_camera_position_dot(server, transformation_matrix):
         signed_yaw, _ = get_camera_yaw_angle(transformed_rotation)
         print(f"Camera yaw relative to world z-axis: {signed_yaw:.1f} degrees")
         
+        # save the first yaw as baseline
+        ensure_initial_yaw_saved(signed_yaw)
+        
         transformed_position = apply_transformation(position, transformation_matrix)
         
 
@@ -252,34 +291,41 @@ def process_clicked_point(clicked_point, transformation_matrix):
         print(f"   World Y movement: {movement_result['y_movement']:.3f}m")
         print(f"   World Z movement: {movement_result['z_movement']:.3f}m")
         
-        # transform world movement to camera coordinates using tilt angle
+        # transform world movement to robot global coordinates w/ baseline yaw
         world_x = movement_result['x_movement']
         world_z = movement_result['z_movement']  # using z as the second coordinate
         world_y = movement_result['y_movement']  # y stays the same
         
-        # get tilt angle from the transformed camera rotation using signed yaw
-        camera_transform = create_camera_transform_matrix(current_camera_position, current_quaternion)
-        transformed_camera_matrix = apply_transformation_to_4x4_matrix(camera_transform, transformation_matrix)
-        transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
-        signed_yaw, _ = get_camera_yaw_angle(transformed_rotation, forward_is_neg_z=False)
-        yaw_rad = np.radians(signed_yaw)
+        # use initial yaw as baseline 
+        initial_yaw = load_initial_yaw_from_file()
+        if initial_yaw is None:
+            camera_transform = create_camera_transform_matrix(current_camera_position, current_quaternion)
+            transformed_camera_matrix = apply_transformation_to_4x4_matrix(camera_transform, transformation_matrix)
+            transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
+            current_signed_yaw, _ = get_camera_yaw_angle(transformed_rotation, forward_is_neg_z=False)
+            baseline_yaw = ensure_initial_yaw_saved(current_signed_yaw)
+            print(f"   Baseline yaw not found; using current yaw {baseline_yaw:.1f}° and saving it.")
+        else:
+            baseline_yaw = initial_yaw
+            print(f"   Using baseline yaw: {baseline_yaw:.1f}°")
+        yaw_rad = np.radians(baseline_yaw)
         
-        # apply 2D rotation transformation (x and z coordinates) - OPPOSITE rotation
-        camera_x =  world_x * np.cos(-yaw_rad) + world_z * np.sin(-yaw_rad)
-        camera_z = -world_x * np.sin(-yaw_rad) + world_z * np.cos(-yaw_rad)
+        # apply 2D rotation transformation with baseline yaw
+        global_x =  world_x * np.cos(-yaw_rad) + world_z * np.sin(-yaw_rad)
+        global_z = -world_x * np.sin(-yaw_rad) + world_z * np.cos(-yaw_rad)
         
-        print(f"   Camera X movement (left + / right -): {camera_x:.3f}m")
-        print(f"   Camera Y movement (up/down): {world_y:.3f}m")
-        print(f"   Camera Z movement (forward + / back -): {camera_z:.3f}m")
-        print(f"   Using tilt angle: {signed_yaw:.1f} degrees")
+        print(f"   Global X movement: {global_x:.3f}m")
+        print(f"   Global Y movement: {world_y:.3f}m")
+        print(f"   Global Z movement: {global_z:.3f}m")
+        print(f"   Using baseline yaw: {baseline_yaw:.1f} degrees")
         
         # TidyBot commands
-        tidybot_x = camera_x
-        tidybot_y = camera_z 
+        tidybot_x = global_x
+        tidybot_y = global_z 
         tidybot_theta = 0.0  # degrees
         
-        print(f"   TidyBot X movement (left + / right -): {tidybot_x:.3f}m")
-        print(f"   TidyBot Y movement (forward + / back -): {tidybot_y:.3f}m")
+        print(f"   TidyBot X movement (global): {tidybot_x:.3f}m")
+        print(f"   TidyBot Y movement (global): {tidybot_y:.3f}m")
         print(f"   TidyBot rotation (theta): {tidybot_theta:.1f} degrees")
         print(f"   TidyBot command: [{tidybot_y:.3f}, {tidybot_x:.3f}, {tidybot_theta:.1f}]")
         
@@ -485,6 +531,14 @@ if __name__ == "__main__":
 
     server = viser.ViserServer()
     server.set_up_direction((0.0, 1.0, 0.0))
+
+    # reset yaw baseline
+    try:
+        if os.path.exists(INITIAL_YAW_FILE):
+            os.remove(INITIAL_YAW_FILE)
+            print(f"Cleared baseline yaw file: {INITIAL_YAW_FILE}")
+    except Exception as e:
+        print(f"Warning: could not clear baseline yaw file: {e}")
     
     # load transformation matrix for movement calculations
     print("Loading transformation matrix for movement calculations...")
@@ -992,6 +1046,8 @@ if __name__ == "__main__":
                     # calculate and update tilt angle using signed yaw
                     signed_yaw, _ = get_camera_yaw_angle(transformed_rotation, forward_is_neg_z=False)
                     yaw_rad = np.radians(signed_yaw)
+
+                    ensure_initial_yaw_saved(signed_yaw)
 
                     cos_tilt = np.cos(yaw_rad)
                     sin_tilt = np.sin(yaw_rad)
