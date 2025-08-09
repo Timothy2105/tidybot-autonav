@@ -8,7 +8,9 @@ import lietorch
 import torch
 import tqdm
 import yaml
+import json
 import numpy as np
+import os
 from mast3r_slam.global_opt import FactorGraph
 
 from mast3r_slam.config import load_config, config, set_global_config
@@ -26,6 +28,73 @@ from mast3r_slam.tracker import FrameTracker
 from mast3r_slam.visualization import WindowMsg, run_visualization
 from mast3r_slam.robot_interface import RobotInterface
 import torch.multiprocessing as mp
+import os
+
+
+class RobotCommandSender:    
+    def __init__(self):
+        self.command_file = "calib-results/runtime/robot_commands.txt"
+        self.result_file = "calib-results/runtime/robot_results.txt"
+    
+    def send_command(self, command):
+        try:
+            #os.makedirs(os.path.dirname(self.command_file), exist_ok=True)
+            with open(self.command_file, 'w') as f:
+                json.dump(command, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error sending command: {e}")
+            return False
+    
+    def read_result(self, timeout=10.0):
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                if os.path.exists(self.result_file):
+                    with open(self.result_file, 'r') as f:
+                        content = f.read().strip()
+                        if content:
+                            # clear the file after reading
+                            os.makedirs(os.path.dirname(self.result_file), exist_ok=True)
+                            with open(self.result_file, 'w') as f:
+                                f.write("")
+                            return json.loads(content)
+            except Exception as e:
+                print(f"Error reading result: {e}")
+            time.sleep(0.1)
+        return None
+    
+    def move_to_waypoint(self, target_pose, threshold_pos=0.01, threshold_theta=0.01, max_steps=100):
+        command = {
+            'type': 'move_to_waypoint',
+            'target_pose': target_pose.tolist(),
+            'threshold_pos': threshold_pos,
+            'threshold_theta': threshold_theta,
+            'max_steps': max_steps
+        }
+        
+        if self.send_command(command):
+            result = self.read_result()
+            if result:
+                return result.get('success', False)
+        return False
+    
+    def get_pose(self):
+        command = {'type': 'get_pose'}
+        
+        if self.send_command(command):
+            result = self.read_result()
+            if result and result.get('success', False):
+                return np.array(result.get('pose', [0, 0, 0]))
+        return np.array([0, 0, 0])
+    
+    def reset(self):
+        command = {'type': 'reset'}
+        
+        if self.send_command(command):
+            result = self.read_result()
+            return result.get('success', False) if result else False
+        return False
 
 
 def find_nearest_keyframe(current_pose, trajectory_data, keyframes, original_kf_count=None):
@@ -106,27 +175,18 @@ def find_nearest_keyframe(current_pose, trajectory_data, keyframes, original_kf_
     # Convert to Euler angles (roll, pitch, yaw) in degrees
     # Using the standard aerospace sequence (ZYX)
     def rotation_matrix_to_euler_angles(R):
-        """
-        Convert rotation matrix to Euler angles (in degrees)
-        Using ZYX convention (yaw-pitch-roll)
-        """
-        # Check for gimbal lock
+        """Convert rotation matrix to Euler angles (roll, pitch, yaw) in degrees"""
         sy = np.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
         singular = sy < 1e-6
         
         if not singular:
-            x = np.arctan2(R[2, 1], R[2, 2])  # Roll
-            y = np.arctan2(-R[2, 0], sy)      # Pitch  
-            z = np.arctan2(R[1, 0], R[0, 0])  # Yaw
+            roll = np.arctan2(R[2, 1], R[2, 2]) * 180 / np.pi
+            pitch = np.arctan2(-R[2, 0], sy) * 180 / np.pi
+            yaw = np.arctan2(R[1, 0], R[0, 0]) * 180 / np.pi
         else:
-            x = np.arctan2(-R[1, 2], R[1, 1])  # Roll
-            y = np.arctan2(-R[2, 0], sy)       # Pitch
-            z = 0                              # Yaw
-        
-        # Convert to degrees
-        roll = x * 180 / np.pi
-        pitch = y * 180 / np.pi
-        yaw = z * 180 / np.pi
+            roll = np.arctan2(-R[1, 2], R[1, 1]) * 180 / np.pi
+            pitch = np.arctan2(-R[2, 0], sy) * 180 / np.pi
+            yaw = 0
         
         return np.array([roll, pitch, yaw])
     
@@ -331,6 +391,12 @@ if __name__ == "__main__":
                        help="Enable robot command sending: actually send commands to TidyBot")
     parser.add_argument("--simulate-robot", action="store_true",
                        help="Simulate robot commands instead of sending to real robot for testing")
+    parser.add_argument("--calib-robot", action="store_true",
+                       help="Enable robot calibration mode: test basic movement commands")
+    parser.add_argument("--load-preds", action="store_true",
+                       help="Load prediction data and enable prediction visualization")
+    parser.add_argument("--enable-click", action="store_true",
+                       help="Enable point cloud clicking functionality to get 3D coordinates")
 
     args = parser.parse_args()
     
@@ -388,7 +454,7 @@ if __name__ == "__main__":
     if not args.no_viz:
         viz = mp.Process(
             target=run_visualization,
-            args=(config, states, keyframes, main2viz, viz2main),
+            args=(config, states, keyframes, main2viz, viz2main, args.load_preds, args.enable_click),
         )
         viz.start()
 
@@ -503,12 +569,7 @@ if __name__ == "__main__":
                 print(f"[REPLAY] Frame: {i} (FPS: {current_fps})")
             i += 1
         
-        # Don't terminate visualization - let it continue for live processing
-        # if not args.no_viz:
-        #     viz.terminate()
-        #     viz.join()
-        
-        # Save results from replay as usual
+        # save results from replay
         if dataset.save_results:
             save_dir, seq_name = eval.prepare_savedir(args, dataset)
             eval.save_traj(save_dir, f"{seq_name}_replay.txt", all_timestamps, keyframes)
@@ -537,7 +598,7 @@ if __name__ == "__main__":
     )
     backend.start()
 
-    # remove the trajectory from the previous run (but keep replay results)
+    # remove the trajectory from previous run
     if dataset.save_results:
         save_dir, seq_name = eval.prepare_savedir(args, dataset)
         traj_file = save_dir / f"{seq_name}.txt"
@@ -561,24 +622,60 @@ if __name__ == "__main__":
 
     frames = []
     
-    # For hybrid mode, track when we switch
+    # track when we switch
     switched_to_live = False
     
-    # For trajectory following, track if we've successfully relocalized
+    # track if we've successfully relocalized
     has_relocalized = False
     
-    # Track original keyframe count for trajectory following
+    # track original keyframe count
     original_kf_count = None
     if args.load_state:
         original_kf_count = len(keyframes)
         print(f"Original keyframe count: {original_kf_count}")
     
-    # Initialize robot interface if sending commands
+    # initialize robot interface
     robot_interface = None
+    robot_command_sender = None
     if args.send_cmd:
         simulate = args.simulate_robot
-        robot_interface = RobotInterface(simulate=simulate)
+        if args.use_command_server:
+            robot_command_sender = RobotCommandSender()
+            print(f"Robot command sender initialized (will send commands to send_cmd.py)")
+        else:
+            robot_interface = RobotInterface(simulate=simulate)
         print(f"Robot interface initialized (simulate={simulate})")
+
+    # load prediction data
+    if args.load_preds:
+        print("Loading prediction data...")
+        try:
+            import numpy as np
+            pred_file = "calib-results/kf-preds/predicted_wheel_poses.npz"
+            gt_file = "calib-results/kf-preds/ground_truth_camera_poses.npz"
+            
+            if os.path.exists(pred_file) and os.path.exists(gt_file):
+                # load prediction data
+                pred_data = np.load(pred_file)
+                gt_data = np.load(gt_file)
+                
+                print(f"Loaded {len(pred_data['positions'])} prediction poses")
+                
+                # assume the first 4 keyframes correspond to the predictions
+                prediction_kf_indices = list(range(min(4, len(keyframes))))
+                
+                # set prediction keyframe indices
+                with states.lock:
+                    states.prediction_keyframe_indices[:] = prediction_kf_indices
+                
+                print(f"Set prediction keyframe indices: {prediction_kf_indices}")
+            else:
+                print(f"Warning: Prediction files not found: {pred_file}, {gt_file}")
+        except Exception as e:
+            print(f"Error loading prediction data: {e}")
+
+    # track if calibration has already run
+    calibration_ran = False
 
     while True:
         mode = states.get_mode()
@@ -596,7 +693,23 @@ if __name__ == "__main__":
         if not last_msg.is_paused:
             states.unpause()
 
-        # For hybrid mode, check if we've finished MP4 and need to switch
+        # check for clicked points from visualization
+        if args.enable_click:
+            try:
+                with keyframes.lock:
+                    # only process clicks if relocalized
+                    is_relocalized = keyframes.relocalized_flag.value == 1
+                    if is_relocalized and states.point_clicked.value == 1:
+                        clicked_coords = np.array(states.clicked_point[:])
+                        print(f"MAIN: Point clicked at coordinates: [{clicked_coords[0]:.3f}, {clicked_coords[1]:.3f}, {clicked_coords[2]:.3f}]")
+                        
+                        # reset flag
+                        states.point_clicked.value = 0
+                        
+            except Exception as e:
+                pass
+
+        # check if we've finished MP4 and need to switch
         if args.hybrid and not switched_to_live and isinstance(dataset, HybridDataset):
             if i >= len(dataset.mp4_dataset):
                 print(f"\nFinished processing MP4 ({i} frames). Switching to live mode...")
@@ -604,7 +717,7 @@ if __name__ == "__main__":
                 switched_to_live = True
                 print("Continue processing with live Realsense feed...")
 
-        # In hybrid live mode, we never reach the end
+        # in hybrid live mode, we never reach the end
         if not (args.hybrid and switched_to_live) and i == len(dataset):
             states.set_mode(Mode.TERMINATED)
             break
@@ -622,7 +735,7 @@ if __name__ == "__main__":
         frame = create_frame(i, img, T_WC, img_size=dataset.img_size, device=device)
 
         if mode == Mode.INIT:
-            # Initialize via mono inference, and encoded features neeed for database
+            # initialize via mono inference, and encoded features needed for database
             X_init, C_init = mast3r_inference_mono(model, frame)
             frame.update_pointmap(X_init, C_init)
             keyframes.append(frame)
@@ -638,28 +751,28 @@ if __name__ == "__main__":
                 states.set_mode(Mode.RELOC)
             states.set_frame(frame)
             
-            # Check if we just successfully relocalized (we're in TRACKING mode after RELOC)
-            if args.follow_traj and not has_relocalized:
-                print(f"🔍 MAIN: In TRACKING mode, checking for relocalization (has_relocalized={has_relocalized})")
-                # Check if the backend has set the relocalization flag
+            # check if we just successfully relocalized (tracking after reloc)
+            if (args.follow_traj or args.calib_robot) and not has_relocalized:
+                print(f" In TRACKING mode, checking for relocalization (has_relocalized={has_relocalized})")
+                # check if the backend relocalized
                 with keyframes.lock:
                     flag_value = keyframes.relocalized_flag.value
-                    print(f"🔍 MAIN: Checking relocalized_flag.value = {flag_value}")
+                    print(f" Checking relocalized_flag.value = {flag_value}")
                     if flag_value == 1:
                         with states.lock:
                             states.relocalized.value = 1
                         has_relocalized = True
-                        print("🎯 RELOCALIZATION DETECTED - Starting trajectory following!")
-                        # Reset the flag
+                        print(" Relocalization detected - Starting post-relocalization action!")
+                        # reset flag
                         keyframes.relocalized_flag.value = 0
-                        print("🔧 MAIN: Reset relocalized_flag to 0")
+                        print(" Reset relocalized_flag to 0")
 
         elif mode == Mode.RELOC:
             X, C = mast3r_inference_mono(model, frame)
             frame.update_pointmap(X, C)
             states.set_frame(frame)
             states.queue_reloc()
-            # In single threaded mode, make sure relocalization happen for every frame
+            # in single threaded mode, make sure relocalization happen for every frame
             while config["single_thread"]:
                 with states.lock:
                     if states.reloc_sem.value == 0:
@@ -672,28 +785,47 @@ if __name__ == "__main__":
         if add_new_kf:
             keyframes.append(frame)
             states.queue_global_optimization(len(keyframes) - 1)
-            # In single threaded mode, wait for the backend to finish
+            # in single threaded mode, wait for the backend to finish
             while config["single_thread"]:
                 with states.lock:
                     if len(states.global_optimizer_tasks) == 0:
                         break
                 time.sleep(0.01)
         
-        # Track camera position continuously
-        if args.load_state:  # Only track position when we have a loaded state
+        # track camera position continuously
+        if args.load_state:  # only track position when we have a loaded state
             current_frame = states.get_frame()
             if current_frame is not None:
                 T_WC = current_frame.T_WC
                 translation = T_WC.data[0, :3].cpu().numpy()
-                # Apply coordinate transformations
-                # transformed_translation = transform_coordinates(translation, args) # Removed as per edit hint
-                # Only print position every 15 frames to avoid spam
                 if i % 15 == 0:
                     print(f"📷 LIVE CAMERA POSITION: x={translation[0]:.3f}, y={translation[1]:.3f}, z={translation[2]:.3f}")
                 
-                # Trajectory following mode - only after relocalization
+                # write camera position and orientation to file for calibration script to read
+                try:
+                    # get camera orientation from current frame
+                    current_frame = states.get_frame()
+                    if current_frame is not None:
+                        T_WC = current_frame.T_WC
+                        # Extract quaternion from Sim3 transformation
+                        quaternion = T_WC.data[0, 3:7].cpu().numpy()  # quaternion part
+                        
+                        camera_data = {
+                            'x': float(translation[0]),
+                            'y': float(translation[1]),
+                            'z': float(translation[2]),
+                            'quaternion': [float(q) for q in quaternion],  # [w, x, y, z]
+                            'timestamp': time.time()
+                        }
+                        os.makedirs("calib-results/runtime", exist_ok=True)
+                        with open('calib-results/runtime/camera_position.txt', 'w') as f:
+                            json.dump(camera_data, f)
+                except Exception as e:
+                    pass
+                
+                # trajectory following mode - only after relocalization
                 if args.follow_traj and trajectory_data is not None:
-                    # Check if we've successfully relocalized
+                    # check if we've successfully relocalized
                     with states.lock:
                         has_relocalized = states.relocalized.value == 1
                     
@@ -705,15 +837,11 @@ if __name__ == "__main__":
                         if nearest_kf_idx is not None and nearest_kf_pose is not None and distance is not None and movement_required is not None and rotation_required is not None:
                             nearest_translation = nearest_kf_pose.data[0, :3].cpu().numpy()
                             
-                            # Get current camera orientation
-                            # Sim3 data format: [quaternion (4), translation (3), scale (1)]
-                            # Extract quaternion and convert to rotation matrix
+                            # get current camera orientation
+                            # sim3 data format: [quaternion (4), translation (3), scale (1)]
+                            # extract quaternion and convert to rotation matrix
                             current_quat = T_WC.data[0, 3:7].cpu().numpy()  # quaternion part
                             target_quat = nearest_kf_pose.data[0, 3:7].cpu().numpy()  # quaternion part
-                            
-                            # Print quaternions for debugging
-                            print(f"   Current frame quaternion: [{current_quat[0]:.3f}, {current_quat[1]:.3f}, {current_quat[2]:.3f}, {current_quat[3]:.3f}]")
-                            print(f"   Target keyframe quaternion: [{target_quat[0]:.3f}, {target_quat[1]:.3f}, {target_quat[2]:.3f}, {target_quat[3]:.3f}]")
                             
                             def quaternion_to_rotation_matrix(q):
                                 """Convert quaternion to rotation matrix"""
@@ -724,74 +852,29 @@ if __name__ == "__main__":
                                     [2*x*z-2*w*y, 2*y*z+2*w*x, 1-2*x*x-2*y*y]
                                 ])
                             
-
-                            
                             current_rotation = quaternion_to_rotation_matrix(current_quat)
                             target_rotation = quaternion_to_rotation_matrix(target_quat)
                             
-                            def calculate_yaw_for_robot(R_current, R_target):
-                                """
-                                Calculate the yaw rotation needed to go from current to target pose
-                                Projects both orientations onto the ground plane (XZ plane)
-                                Returns positive for LEFT/CCW rotation, negative for RIGHT/CW rotation
-                                """
-                                # Extract forward vectors (Z axis in camera frame)
-                                forward_current = R_current[:, 2]
-                                forward_target = R_target[:, 2]
-                                
-                                # Project onto ground plane (XZ plane, removing Y component)
-                                forward_current_ground = np.array([forward_current[0], 0, forward_current[2]])
-                                forward_target_ground = np.array([forward_target[0], 0, forward_target[2]])
-                                
-                                # Normalize
-                                forward_current_ground = forward_current_ground / np.linalg.norm(forward_current_ground)
-                                forward_target_ground = forward_target_ground / np.linalg.norm(forward_target_ground)
-                                
-                                # Calculate angle using atan2 directly on components
-                                current_heading = np.arctan2(forward_current_ground[0], forward_current_ground[2])
-                                target_heading = np.arctan2(forward_target_ground[0], forward_target_ground[2])
-                                angle_rad = target_heading - current_heading
-                                
-                                # Normalize to [-180, 180]
-                                while angle_rad > np.pi:
-                                    angle_rad -= 2*np.pi
-                                while angle_rad < -np.pi:
-                                    angle_rad += 2*np.pi
-                                
-                                angle_deg = np.degrees(angle_rad)
-                                
-                                return angle_deg, angle_rad
-                            
                             def rotation_matrix_to_euler_angles(R):
-                                """
-                                Convert rotation matrix to Euler angles (in degrees)
-                                Using ZYX convention (yaw-pitch-roll)
-                                """
-                                # Check for gimbal lock
+                                """Convert rotation matrix to Euler angles (roll, pitch, yaw) in degrees"""
                                 sy = np.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
                                 singular = sy < 1e-6
                                 
                                 if not singular:
-                                    x = np.arctan2(R[2, 1], R[2, 2])  # Roll
-                                    y = np.arctan2(-R[2, 0], sy)      # Pitch  
-                                    z = np.arctan2(R[1, 0], R[0, 0])  # Yaw
+                                    roll = np.arctan2(R[2, 1], R[2, 2]) * 180 / np.pi
+                                    pitch = np.arctan2(-R[2, 0], sy) * 180 / np.pi
+                                    yaw = np.arctan2(R[1, 0], R[0, 0]) * 180 / np.pi
                                 else:
-                                    x = np.arctan2(-R[1, 2], R[1, 1])  # Roll
-                                    y = np.arctan2(-R[2, 0], sy)       # Pitch
-                                    z = 0                              # Yaw
-                                
-                                # Convert to degrees
-                                roll = x * 180 / np.pi
-                                pitch = y * 180 / np.pi
-                                yaw = z * 180 / np.pi
+                                    roll = np.arctan2(-R[1, 2], R[1, 1]) * 180 / np.pi
+                                    pitch = np.arctan2(-R[2, 0], sy) * 180 / np.pi
+                                    yaw = 0
                                 
                                 return np.array([roll, pitch, yaw])
                             
                             current_euler = rotation_matrix_to_euler_angles(current_rotation)
                             target_euler = rotation_matrix_to_euler_angles(target_rotation)
                             
-                            # Calculate movement in camera's local coordinate frame
-                            # First, apply the required rotation to get the movement in the rotated frame
+                            # Calculate movement and rotation in camera's local coordinate frame
                             
                             # Create rotation matrix from current camera orientation
                             def euler_to_rotation_matrix(roll, pitch, yaw):
@@ -811,7 +894,7 @@ if __name__ == "__main__":
                             current_rot_matrix = euler_to_rotation_matrix(current_euler[0], current_euler[1], current_euler[2])
                             
                             # Transform movement from world coordinates to camera coordinates
-                            # Camera coordinates: X=right, Y=down, Z=forward
+                            # Camera coordinates: X=forward, Y=left, Z=up
                             movement_in_camera_frame = current_rot_matrix.T @ movement_required
                             
                             # Extract movement components in camera frame
@@ -819,47 +902,63 @@ if __name__ == "__main__":
                             left_movement = movement_in_camera_frame[1]     # Y-axis (left/right)
                             up_movement = movement_in_camera_frame[2]       # Z-axis (up/down)
                             
+                            # Calculate Y-axis rotation from quaternions (camera frame)
+                            # Convert quaternions to Euler angles and extract Y-axis rotation (pitch)
+                            def quaternion_to_euler_angles(q):
+                                """Convert quaternion to Euler angles (roll, pitch, yaw) in degrees"""
+                                w, x, y, z = q
+                                
+                                # Roll (x-axis rotation)
+                                sinr_cosp = 2 * (w * x + y * z)
+                                cosr_cosp = 1 - 2 * (x * x + y * y)
+                                roll = np.arctan2(sinr_cosp, cosr_cosp)
+                                
+                                # Pitch (y-axis rotation)
+                                sinp = 2 * (w * y - z * x)
+                                if abs(sinp) >= 1:
+                                    pitch = np.copysign(np.pi / 2, sinp)  # use 90 degrees if out of range
+                                else:
+                                    pitch = np.arcsin(sinp)
+                                
+                                # Yaw (z-axis rotation)
+                                siny_cosp = 2 * (w * z + x * y)
+                                cosy_cosp = 1 - 2 * (y * y + z * z)
+                                yaw = np.arctan2(siny_cosp, cosy_cosp)
+                                
+                                return np.array([np.degrees(roll), np.degrees(pitch), np.degrees(yaw)])
+                            
+                            # Get current and target Euler angles from quaternions
+                            current_euler_from_quat = quaternion_to_euler_angles(current_quat)
+                            target_euler_from_quat = quaternion_to_euler_angles(target_quat)
+                            
+                            # Calculate Y-axis rotation difference (pitch)
+                            y_rotation_deg = target_euler_from_quat[1] - current_euler_from_quat[1]
+                            
+                            # Normalize to [-180, 180] degrees
+                            while y_rotation_deg > 180:
+                                y_rotation_deg -= 360
+                            while y_rotation_deg < -180:
+                                y_rotation_deg += 360
+                            
                             print(f"TRAJECTORY FOLLOWING (After Relocalization):")
                             print(f"   Current Frame: {i}")
                             print(f"   Current Position: x={translation[0]:.3f}, y={translation[1]:.3f}, z={translation[2]:.3f}")
+                            print(f"   Current Orientation: roll={current_euler[0]:.1f}°, pitch={current_euler[1]:.1f}°, yaw={current_euler[2]:.1f}°")
                             print(f"   Target Keyframe: {nearest_kf_idx} (Frame ID: {keyframes[nearest_kf_idx].frame_id})")
                             print(f"   Target Position: x={nearest_translation[0]:.3f}, y={nearest_translation[1]:.3f}, z={nearest_translation[2]:.3f}")
+                            print(f"   Target Orientation: roll={target_euler[0]:.1f}°, pitch={target_euler[1]:.1f}°, yaw={target_euler[2]:.1f}°")
                             print(f"   Distance to Target: {distance:.3f}")
                             print(f"   World Movement: dx={movement_required[0]:.3f}, dy={movement_required[1]:.3f}, dz={movement_required[2]:.3f}")
                             print(f"   Camera Movement: forward={forward_movement:+.3f}, left={left_movement:+.3f}, up={up_movement:+.3f}")
                             print(f"   Total Movement: {np.linalg.norm(movement_required):.3f}")
-                            
-                            def shortest_angular_difference(angle1, angle2):
-                                """Calculate the shortest angular difference between two angles"""
-                                diff = angle2 - angle1
-                                # Normalize to [-180, 180]
-                                while diff > 180:
-                                    diff -= 360
-                                while diff < -180:
-                                    diff += 360
-                                return diff
-                            
-                            # Compare Euler angles
-                            print(f"ROTATION COMPARISON:")
-                            print(f"   Current Euler angles - roll={current_euler[0]:.1f}°, pitch={current_euler[1]:.1f}°, yaw={current_euler[2]:.1f}°")
-                            print(f"   Target Euler angles - roll={target_euler[0]:.1f}°, pitch={target_euler[1]:.1f}°, yaw={target_euler[2]:.1f}°")
-                            
-                            # Calculate yaw rotation using ground plane projection
-                            yaw_diff, yaw_diff_rad = calculate_yaw_for_robot(current_rotation, target_rotation)
-                            
-                            # Calculate pitch and roll differences using Euler angles
-                            pitch_diff = shortest_angular_difference(current_euler[1], target_euler[1])
-                            roll_diff = shortest_angular_difference(current_euler[0], target_euler[0])
-                            
-                            print(f"   Yaw difference (left/right): {yaw_diff:.1f}°")
-                            print(f"   Pitch difference (up/down): {pitch_diff:.1f}°")
-                            print(f"   Roll difference: {roll_diff:.1f}°")
-                            print(f"   Yaw calculation method: Ground plane projection")
+                            print(f"   World Rotation Required: roll={rotation_required[0]:.1f}°, pitch={rotation_required[1]:.1f}°, yaw={rotation_required[2]:.1f}°")
+                            print(f"   Camera Y-Axis Rotation (from quaternion): {y_rotation_deg:+.1f}°")
+                            print(f"   Total World Rotation: {np.linalg.norm(rotation_required):.1f}°")
                             
                             # Generate robot movement suggestions
                             print(f"ROBOT COMMANDS:")
-                            if abs(rotation_required[2]) > 5.0:  # If yaw rotation > 5 degrees
-                                print(f"   1. ROTATE: {rotation_required[2]:+.1f}° (yaw)")
+                            if abs(y_rotation_deg) > 5.0:  # If camera Y-axis rotation > 5 degrees
+                                print(f"   1. ROTATE: {y_rotation_deg:+.1f}° (camera Y-axis)")
                             if abs(forward_movement) > 0.05:  # If forward movement > 5cm
                                 direction = "FORWARD" if forward_movement > 0 else "BACKWARD"
                                 print(f"   2. MOVE {direction}: {abs(forward_movement):.3f}m")
@@ -877,10 +976,10 @@ if __name__ == "__main__":
                             # rotation: pos=rotate_left, neg=rotate_right
                             print(f"TIDYBOT COMMANDS:")
                             
-                            # Convert movement to TidyBot format using ground plane yaw calculation
+                            # Convert movement to TidyBot format
                             tidybot_y = 0  # No up/down movement (camera is static)
                             tidybot_x = -left_movement  # Invert left movement for TidyBot coordinate system
-                            tidybot_rotation_deg = -yaw_diff  # Use ground plane yaw calculation for left/right rotation
+                            tidybot_rotation_deg = -y_rotation_deg  # Use camera Y-axis rotation from quaternion
                             
                             # Apply thresholds to avoid tiny movements
                             if abs(tidybot_x) < 0.05:  # Less than 5cm
@@ -888,6 +987,7 @@ if __name__ == "__main__":
                             if abs(tidybot_rotation_deg) < 5.0:  # Less than 5 degrees
                                 tidybot_rotation_deg = 0
                             
+                            print(f"🤖 TIDYBOT COMMANDS:")
                             print(f"   TidyBot Command: [{tidybot_y:.3f}, {tidybot_x:.3f}, {tidybot_rotation_deg:.1f}°]")
                             print(f"   Explanation:")
                             if tidybot_y != 0:
@@ -896,67 +996,95 @@ if __name__ == "__main__":
                                 print(f"     X: {tidybot_x:+.3f} ({'LEFT' if tidybot_x > 0 else 'RIGHT'})")
                             if tidybot_rotation_deg != 0:
                                 print(f"     Rotation: {tidybot_rotation_deg:+.1f}° ({'ROTATE LEFT' if tidybot_rotation_deg > 0 else 'ROTATE RIGHT'})")
-                                print(f"     (Using ground plane projection for left/right rotation)")
                             if tidybot_y == 0 and tidybot_x == 0 and tidybot_rotation_deg == 0:
-                                print(f"     No movement required (within thresholds)")
+                                print(f"     ✅ No movement required (within thresholds)")
                             print("   ---")
                             
-                            # # Send command to robot if enabled
-                            # if args.send_cmd and robot_interface is not None:
-                            #     print("SENDING COMMAND TO ROBOT...")
+                            # Send command to robot if enabled
+                            if args.send_cmd and robot_interface is not None:
+                                print("SENDING COMMAND TO ROBOT...")
                                 
-                            #     # Convert to radians for robot
-                            #     rotation_rad = np.radians(tidybot_rotation_deg)
+                                # Convert to radians for robot
+                                rotation_rad = np.radians(tidybot_rotation_deg)
                                 
-                            #     # Create target pose for robot
-                            #     # TidyBot format: [y, x, rotation] where y=up/down, x=left/right, rotation=turn
-                            #     target_pose = np.array([tidybot_y, tidybot_x, rotation_rad])
+                                # Create target pose for robot
+                                # TidyBot format: [y, x, rotation] where y=up/down, x=left/right, rotation=turn
+                                target_pose = np.array([tidybot_y, tidybot_x, rotation_rad])
                                 
-                            #     # Use incremental movement to reach target
-                            #     success = robot_interface.move_to_base_waypoint(
-                            #         target_pose, 
-                            #         threshold_pos=0.01,  # 1cm position threshold
-                            #         threshold_theta=0.01,  # ~0.6 degrees rotation threshold
-                            #         max_steps=100
-                            #     )
+                                # Use incremental movement to reach target with improved position monitoring
+                                print("Starting robot movement with wheel odometry monitoring...")
+                                success = robot_interface.move_to_base_waypoint(
+                                    target_pose, 
+                                    threshold_pos=0.01,  # 1cm position threshold
+                                    threshold_theta=0.01,  # ~0.6 degrees rotation threshold
+                                    max_steps=100
+                                )
                                 
-                            #     if success:
-                            #         print("Robot successfully reached target position!")
-                            #     else:
-                            #         print("Robot failed to reach target position")
+                                if success:
+                                    print("✅ Robot successfully reached target position using wheel odometry!")
+                                    # Get final position for verification
+                                    final_obs = robot_interface.get_obs()
+                                    final_pose = final_obs["base_pose"]
+                                    print(f"Final robot position: [x={final_pose[0]:.3f}, y={final_pose[1]:.3f}, theta={np.degrees(final_pose[2]):.1f}°]")
+                                else:
+                                    print("❌ Robot failed to reach target position")
                                 
-                                # Note: Don't close robot interface here to keep it available for future commands
+                                # Close robot interface
+                                robot_interface.close()
                             
-                            # # Save target keyframe image for visualization
-                            # import os
-                            # import cv2
-                            # 
-                            # # Create follow-traj folder if it doesn't exist
-                            # follow_traj_dir = "follow-traj"
-                            # os.makedirs(follow_traj_dir, exist_ok=True)
-                            # 
-                            # # Get the target keyframe image
-                            # target_keyframe = keyframes[nearest_kf_idx]
-                            # target_img = target_keyframe.uimg.numpy()  # Get the image as numpy array
-                            # 
-                            # # Convert from [0,1] range to [0,255] and to BGR for OpenCV
-                            # target_img_uint8 = (target_img * 255).astype(np.uint8)
-                            # target_img_bgr = cv2.cvtColor(target_img_uint8, cv2.COLOR_RGB2BGR)
-                            # 
-                            # # Save the target keyframe image (overwrites each time)
-                            # target_filename = f"{follow_traj_dir}/target_keyframe.png"
-                            # cv2.imwrite(target_filename, target_img_bgr)
-                            # 
-                            # print(f"Target keyframe image saved: {target_filename}")
-                            # print(f"  - Keyframe {nearest_kf_idx} (Frame {target_keyframe.frame_id})")
-                            # print(f"  - Target position: x={nearest_translation[0]:.3f}, y={nearest_translation[1]:.3f}, z={nearest_translation[2]:.3f}")
+                            # send command to robot command server if enabled
+                            if args.send_cmd and robot_command_sender is not None:
+                                print("SENDING COMMAND TO ROBOT COMMAND SERVER...")
+                                
+                                # convert to radians for robot
+                                rotation_rad = np.radians(tidybot_rotation_deg)
+                                
+                                # create target pose for robot
+                                target_pose = np.array([tidybot_y, tidybot_x, rotation_rad])
+                                
+                                # send command to the command server
+                                print("Starting robot movement via command server...")
+                                success = robot_command_sender.move_to_waypoint(
+                                    target_pose, 
+                                    threshold_pos=0.01,  # 1cm position threshold
+                                    threshold_theta=0.01,  # ~0.6 degrees rotation threshold
+                                    max_steps=100
+                                )
+                                
+                                if success:
+                                    print(" Robot successfully reached target position via command server!")
+                                    # get final position for verification
+                                    final_pose = robot_command_sender.get_pose()
+                                    print(f"Final robot position: [x={final_pose[0]:.3f}, y={final_pose[1]:.3f}, theta={np.degrees(final_pose[2]):.1f}°]")
+                                else:
+                                    print(" Robot failed to reach target position via command server")
+
+                            # save target keyframe image for visualization
+                            follow_traj_dir = "follow-traj"
+                            os.makedirs(follow_traj_dir, exist_ok=True)
+                            
+                            # get the target keyframe image
+                            target_keyframe = keyframes[nearest_kf_idx]
+                            target_img = target_keyframe.uimg.numpy()  # Get the image as numpy array
+                            
+                            # Convert from [0,1] range to [0,255] and to BGR for OpenCV
+                            target_img_uint8 = (target_img * 255).astype(np.uint8)
+                            target_img_bgr = cv2.cvtColor(target_img_uint8, cv2.COLOR_RGB2BGR)
+                            
+                            # Save the target keyframe image (overwrites each time)
+                            target_filename = f"{follow_traj_dir}/target_keyframe.png"
+                            cv2.imwrite(target_filename, target_img_bgr)
+                            
+                            print(f"Target keyframe image saved: {target_filename}")
+                            print(f"  - Keyframe {nearest_kf_idx} (Frame {target_keyframe.frame_id})")
+                            print(f"  - Target position: x={nearest_translation[0]:.3f}, y={nearest_translation[1]:.3f}, z={nearest_translation[2]:.3f}")
                             
                             # Set target keyframe for visualization
                             with states.lock:
                                 states.target_keyframe_idx.value = nearest_kf_idx
-                                states.show_target_keyframe.value = 1  # Enable blue visualization
+                            print(f"🎯 VISUALIZATION: Set target keyframe to {nearest_kf_idx} (should appear BLUE in viewer)")
                             
-                            # # After giving the movement command, end the script
+                            # After giving the movement command, end the script
                             # print(f"GIVEN MOVEMENT COMMAND - Ending trajectory following.")
                             # states.set_mode(Mode.TERMINATED)
                             # break
@@ -965,6 +1093,19 @@ if __name__ == "__main__":
                         if i % 30 == 0:
                             print("Waiting for relocalization before starting trajectory following...")
         
+        # After relocalization, notify that calibration can be run separately
+        if args.calib_robot and has_relocalized and not calibration_ran:
+            print("\n🎯 RELOCALIZATION COMPLETE!")
+            print("SLAM system is now running continuously.")
+            print("\n" + "="*60)
+            print("TO RUN CALIBRATION:")
+            print("1. Open a new terminal")
+            print("2. Run: python robot_calibration.py")
+            print("3. Press Enter when prompted")
+            print("="*60)
+            print("SLAM will continue running while calibration runs in the other terminal.")
+            calibration_ran = True
+
         # log time
         if i % 30 == 0:
             current_fps = i / (time.time() - fps_timer)
@@ -1023,3 +1164,5 @@ if __name__ == "__main__":
     # Clean up robot interface
     if robot_interface is not None:
         robot_interface.close()
+    if robot_command_sender is not None:
+        print("Robot command sender cleanup complete")

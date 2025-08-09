@@ -33,8 +33,14 @@ def load_retriever(mast3r_model, retriever_path=None, device="cuda"):
 
 @torch.inference_mode
 def decoder(model, feat1, feat2, pos1, pos2, shape1, shape2):
-    # safety check for shape params
+    # Add debug prints
+    #print(f"DEBUG: shape1 = {shape1}, shape1.shape = {shape1.shape if hasattr(shape1, 'shape') else 'no shape'}")
+    #print(f"DEBUG: shape2 = {shape2}, shape2.shape = {shape2.shape if hasattr(shape2, 'shape') else 'no shape'}")
+    #print(f"DEBUG: feat1.shape = {feat1.shape}, feat2.shape = {feat2.shape}")
+    
+    # Add safety check for shape parameters
     if shape1[0, 0] == 0 or shape1[0, 1] == 0:
+        # print(f"DEBUG: Using default shape1 = tensor([[384, 512]], device='cuda:0', dtype=torch.int32)")
         shape1 = torch.tensor([[384, 512]], device=shape1.device, dtype=shape1.dtype)
     
     if (shape2 is None or 
@@ -43,6 +49,7 @@ def decoder(model, feat1, feat2, pos1, pos2, shape1, shape2):
         (hasattr(shape2, 'shape') and shape2.shape[0] > 0 and (shape2[0] == 0).any())):
         h, w = feat2.shape[1] // 16, feat2.shape[1] // 16
         shape2 = torch.tensor([[384, 512]], device=shape2.device, dtype=shape2.dtype)
+        # print(f"DEBUG: Using default shape2 = {shape2}")
     
     dec1, dec2 = model._decoder(feat1, pos1, feat2, pos2)
     with torch.amp.autocast(enabled=False, device_type="cuda"):

@@ -205,29 +205,38 @@ class RealsenseDataset(MonocularDataset):
         return img
 
 class HybridDataset(MonocularDataset):
+    """
+    Hybrid dataset that first processes an MP4 file, then switches to Realsense live feed.
+    """
     def __init__(self, mp4_path):
         super().__init__()
         self.mp4_path = pathlib.Path(mp4_path)
+        
+        # Initialize MP4 dataset
         self.mp4_dataset = MP4Dataset(mp4_path)
         
-        # init realsense
+        # Initialize Realsense dataset (but don't start pipeline yet)
         self.realsense_dataset = None
         self.is_live_mode = False
         self.mp4_processed_frames = 0
         
+        # Copy initial properties from MP4 dataset
         self.use_calibration = self.mp4_dataset.use_calibration
         self.dataset_path = self.mp4_dataset.dataset_path
         self.save_results = True
         
+        # Resolution checking variables
         self.mp4_resolution = None
         self.realsense_resolution = None
         
+        # Track total frames processed across both modes
         self.total_frames_processed = 0
         
-        # track FPS for live
-        self.live_fps = 30.0  # default estimation
+        # track actual FPS for live mode
+        self.live_fps = 30.0 # default estimate
         self.live_fps_tracker = {'start_time': None, 'frame_count': 0}
 
+        # store effective fps after skip-frames for MP4
         self.mp4_effective_fps = self.mp4_dataset.fps / self.mp4_dataset.stride
 
     def set_live_fps(self, fps):
@@ -235,76 +244,86 @@ class HybridDataset(MonocularDataset):
             self.live_fps = fps
 
     def _init_realsense(self):
+        """Initialize Realsense dataset and verify resolution match."""
         print("Initializing Realsense for hybrid mode...")
         self.realsense_dataset = RealsenseDataset()
         
-        # fetch mp4 res
+        # Get MP4 resolution if not already stored
         if self.mp4_resolution is None:
             test_img = self.mp4_dataset.read_img(0)
             self.mp4_resolution = (test_img.shape[1], test_img.shape[0])  # (width, height)
             print(f"MP4 resolution: {self.mp4_resolution[0]}x{self.mp4_resolution[1]}")
         
-        # fetch realsense res
+        # Get Realsense resolution
         self.realsense_resolution = (self.realsense_dataset.w, self.realsense_dataset.h)
         print(f"Realsense resolution: {self.realsense_resolution[0]}x{self.realsense_resolution[1]}")
         
-        # res match?
+        # Check if resolutions match
         if self.mp4_resolution != self.realsense_resolution:
             print(f"WARNING: Resolution mismatch!")
             print(f"MP4: {self.mp4_resolution[0]}x{self.mp4_resolution[1]}")
             print(f"Realsense: {self.realsense_resolution[0]}x{self.realsense_resolution[1]}")
             print("This may cause issues with the SLAM system.")
             
+            # Ask user if they want to continue
             response = input("Continue anyway? (y/n): ")
             if response.lower() != 'y':
                 raise ValueError("Resolution mismatch - aborting hybrid mode")
         else:
             print("Resolution match confirmed!")
             
-        # if mp4 calib, realsense calib too
+        # If calibration was used for MP4, try to use it for Realsense too
         if self.use_calibration and self.mp4_dataset.camera_intrinsics:
             print("Attempting to use MP4 calibration for Realsense...")
+            # This might need adjustment based on your specific use case
             self.realsense_dataset.use_calibration = True
             
     def switch_to_live(self):
+        """Switch from MP4 to live Realsense feed."""
         if not self.is_live_mode:
             print(f"\nSwitching to live mode after processing {self.mp4_processed_frames} MP4 frames...")
             print(f"MP4 was processed at effective FPS: {self.mp4_effective_fps:.2f} (60fps with skip-frames={self.mp4_dataset.stride})") 
             if self.realsense_dataset is None:
                 self._init_realsense()
             self.is_live_mode = True
-            
+            # Ensure timestamps list is properly initialized from MP4
             if len(self.timestamps) == 0 and len(self.mp4_dataset.timestamps) > 0:
                 self.timestamps = self.mp4_dataset.timestamps.copy()
             print(f"Timestamps available: {len(self.timestamps)}")
             print("Now in live mode!")
 
-            # fps track   
+            # Initialize live FPS tracking   
             self.live_fps_tracker['start_time'] = time.time() 
             self.live_fps_tracker['frame_count'] = 0
             
     def __len__(self):
         if self.is_live_mode:
-            return 999999  
+            return 999999  # Unlimited for live mode
         else:
             return len(self.mp4_dataset)
             
     def __getitem__(self, idx):
+        # For hybrid mode, we need to maintain continuous timestamps
         if not self.is_live_mode and idx >= len(self.mp4_dataset):
             self.switch_to_live()
             
         if self.is_live_mode:
+            # Track live FPS 
             if self.live_fps_tracker['start_time'] is not None: 
                 self.live_fps_tracker['frame_count'] += 1 
                 elapsed = time.time() - self.live_fps_tracker['start_time'] 
-                if elapsed > 2.0:  # update every 2 sec
+                if elapsed > 2.0:  # Update FPS every 2 seconds
                     measured_fps = self.live_fps_tracker['frame_count'] / elapsed 
                     self.live_fps = measured_fps        
+                    # Reset tracker               
                     self.live_fps_tracker['start_time'] = time.time() 
                     self.live_fps_tracker['frame_count'] = 0
-
+            
+            # Get image and create timestamp based on total frames
             img = self.get_image(idx)
+            # Create continuous timestamp using live FPS   
             if len(self.timestamps) > 0:
+                # Continue from last MP4 timestamp with assumed framerate
                 last_timestamp = self.timestamps[-1]
                 time_increment = 1.0 / self.live_fps
                 timestamp = last_timestamp + time_increment
@@ -314,30 +333,34 @@ class HybridDataset(MonocularDataset):
             self.total_frames_processed += 1
             return timestamp, img
         else:
-            # mp4 dataset
+            # Use MP4 dataset
             self.mp4_processed_frames = idx + 1
             self.total_frames_processed = idx + 1
             timestamp, img = self.mp4_dataset[idx]
-
+            # Make sure to append timestamp to our list
             if len(self.timestamps) <= idx:
                 self.timestamps.append(timestamp)
             return timestamp, img
             
     def get_timestamp(self, idx):
+        # Return the timestamp from our maintained list
         if idx < len(self.timestamps):
             return self.timestamps[idx]
         else:
+            # This shouldn't happen if __getitem__ is called properly
             print(f"Warning: Timestamp requested for idx {idx} but only have {len(self.timestamps)} timestamps")
             return idx / self.live_fps
             
     def read_img(self, idx):
         if self.is_live_mode:
+            # For live mode, always read fresh frame from camera
             return self.realsense_dataset.read_img(0)
         else:
             return self.mp4_dataset.read_img(idx)
             
     def get_image(self, idx):
         if self.is_live_mode:
+            # Always read fresh frame for live mode
             img = self.realsense_dataset.read_img(0)
             if self.realsense_dataset.use_calibration and self.realsense_dataset.camera_intrinsics:
                 img = self.realsense_dataset.camera_intrinsics.remap(img)
@@ -346,11 +369,13 @@ class HybridDataset(MonocularDataset):
             return self.mp4_dataset.get_image(idx)
             
     def get_img_shape(self):
+        # Use MP4 dataset for shape since we start with it
         return self.mp4_dataset.get_img_shape()
         
     def subsample(self, subsample):
+        # Only subsample the MP4 part
         self.mp4_dataset.subsample(subsample)
-        # update fps
+        # update effective FPS
         self.mp4_effective_fps = self.mp4_dataset.fps / self.mp4_dataset.stride
         
     def has_calib(self):
@@ -401,8 +426,10 @@ class MP4Dataset(MonocularDataset):
             self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         self.stride = config["dataset"]["subsample"]
+        # Pre-calculate timestamps for all frames
         self.timestamps = []
         for i in range(self.__len__()):
+            # correct timestamp calculation: frame_index * stride
             self.timestamps.append(i * self.stride / self.fps)
 
     def __len__(self):
@@ -417,6 +444,7 @@ class MP4Dataset(MonocularDataset):
         if idx < len(self.timestamps):
             return self.timestamps[idx]
         else:
+            # Calculate on the fly if needed
             return idx * self.stride / self.fps
 
     def read_img(self, idx):
@@ -440,9 +468,11 @@ class MP4Dataset(MonocularDataset):
         return img.astype(self.dtype) / 255.0
 
     def subsample(self, subsample):
+        # Update stride and recalculate timestamps
         self.stride = subsample
         self.timestamps = []
         for i in range(self.__len__()):
+            # recalculate with new stride
             self.timestamps.append(i * self.stride / self.fps)
 
 

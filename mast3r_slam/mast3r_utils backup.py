@@ -33,17 +33,6 @@ def load_retriever(mast3r_model, retriever_path=None, device="cuda"):
 
 @torch.inference_mode
 def decoder(model, feat1, feat2, pos1, pos2, shape1, shape2):
-    # safety check for shape params
-    if shape1[0, 0] == 0 or shape1[0, 1] == 0:
-        shape1 = torch.tensor([[384, 512]], device=shape1.device, dtype=shape1.dtype)
-    
-    if (shape2 is None or 
-        (hasattr(shape2, 'numel') and shape2.numel() == 0) or 
-        (hasattr(shape2, '__len__') and len(shape2) == 0) or
-        (hasattr(shape2, 'shape') and shape2.shape[0] > 0 and (shape2[0] == 0).any())):
-        h, w = feat2.shape[1] // 16, feat2.shape[1] // 16
-        shape2 = torch.tensor([[384, 512]], device=shape2.device, dtype=shape2.dtype)
-    
     dec1, dec2 = model._decoder(feat1, pos1, feat2, pos2)
     with torch.amp.autocast(enabled=False, device_type="cuda"):
         res1 = model._downstream_head(1, [tok.float() for tok in dec1], shape1)

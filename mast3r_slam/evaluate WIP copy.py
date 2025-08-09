@@ -16,6 +16,7 @@ from mast3r_slam.geometry import constrain_points_to_ray
 from plyfile import PlyData, PlyElement
 import datetime
 from pathlib import Path
+from asmk import io_helpers
 
 def prepare_savedir(args, dataset):
     save_dir = pathlib.Path("logs")
@@ -23,11 +24,12 @@ def prepare_savedir(args, dataset):
         save_dir = save_dir / args.save_as
     save_dir.mkdir(exist_ok=True, parents=True)
 
-    # check if filepath exists
+    # Check if the dataset has a file path (like a video or folder)
     if dataset.dataset_path:
+        # If it does, use the filename as the sequence name
         seq_name = dataset.dataset_path.stem
     else:
-        # live stream
+        # If it's a live stream (realsense/webcam), create a default name with a timestamp
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         seq_name = f"live_session_{timestamp}"
 
@@ -47,11 +49,12 @@ def save_traj(
         # for keyframe_id in frames.keyframe_ids:
         for i in range(len(frames)):
             keyframe = frames[i]
+            # Safety check: ensure frame_id is within range of timestamps
             if keyframe.frame_id < len(timestamps):
                 t = timestamps[keyframe.frame_id]
             else:
-                # default
-                t = i * 0.1  # 0.1 sec int
+                # Use a default timestamp if frame_id is out of range
+                t = i * 0.1  # 0.1 second intervals as fallback
             if intrinsics is None:
                 T_WC = as_SE3(keyframe.T_WC)
             else:
@@ -91,11 +94,12 @@ def save_keyframes(savedir, timestamps, keyframes: SharedKeyframes):
     savedir.mkdir(exist_ok=True, parents=True)
     for i in range(len(keyframes)):
         keyframe = keyframes[i]
+        # Safety check: ensure frame_id is within range of timestamps
         if keyframe.frame_id < len(timestamps):
             t = timestamps[keyframe.frame_id]
         else:
-            # default
-            t = i * 0.1  # 0.1 sec int
+            # Use a default timestamp if frame_id is out of range
+            t = i * 0.1  # 0.1 second intervals as fallback
         filename = savedir / f"{t}.png"
         cv2.imwrite(
             str(filename),
@@ -107,7 +111,7 @@ def save_keyframes(savedir, timestamps, keyframes: SharedKeyframes):
 
 def save_ply(filename, points, colors):
     colors = colors.astype(np.uint8)
-    # xyz rgb array
+    # Combine XYZ and RGB into a structured array
     pcd = np.empty(
         len(points),
         dtype=[
@@ -126,23 +130,27 @@ def save_ply(filename, points, colors):
     ply_data.write(filename)
 
 def save_slam_state(save_dir, keyframes, retrieval_database, factor_graph, states, timestamps):
+    """
+    Enhanced save function that preserves sequential processing order and trajectories
+    """
     save_dir = Path(save_dir)
     slam_state_dir = save_dir
     slam_state_dir.mkdir(exist_ok=True, parents=True)
     
     print(f"Saving enhanced SLAM state to {slam_state_dir}")
 
+    # Save sequential processing metadata
     sequence_metadata = {
         'total_frames_processed': len(timestamps),
         'keyframe_count': len(keyframes),
-        'processing_order': [],
-        'keyframe_insertion_order': [], 
-        'frame_to_keyframe_mapping': {},
+        'processing_order': [],  # Will store the order frames were processed
+        'keyframe_insertion_order': [],  # Order keyframes were added
+        'frame_to_keyframe_mapping': {},  # Maps frame_id to keyframe index
         'timestamps': list(timestamps),
-        'mode_transitions': [],  # track changing mode
+        'mode_transitions': [],  # Track when mode changed (INIT -> TRACKING -> RELOC, etc.)
     }
 
-    # save sequentially
+    # Build processing order and keyframe mapping
     keyframe_insertion_order = []
     frame_to_keyframe_mapping = {}
     
@@ -155,29 +163,30 @@ def save_slam_state(save_dir, keyframes, retrieval_database, factor_graph, state
     sequence_metadata['keyframe_insertion_order'] = keyframe_insertion_order
     sequence_metadata['frame_to_keyframe_mapping'] = frame_to_keyframe_mapping
     
+    # Save processing order (for now, assume sequential - can be enhanced)
     sequence_metadata['processing_order'] = list(range(len(timestamps)))
 
-    # intrinsics
+    # Save intrinsics if available
     if config["use_calib"]:
         K = keyframes.get_intrinsics()
         sequence_metadata['intrinsics'] = K.cpu().numpy()
 
-    # metadata
+    # Save sequence metadata
     torch.save(sequence_metadata, slam_state_dir / "sequence_metadata.pth")
 
-    # save kf
+    # Save keyframes with enhanced trajectory information
     keyframes_data = {
         'n_keyframes': len(keyframes),
         'keyframe_data': [],
         'trajectory_data': {
-            'poses': [],       
-            'pose_timestamps': [],
-            'pose_confidence': [],
-            'tracking_status': [],
+            'poses': [],           # All poses in processing order
+            'pose_timestamps': [], # Corresponding timestamps
+            'pose_confidence': [], # Confidence/quality scores
+            'tracking_status': [], # INIT/TRACKING/RELOC for each frame
         }
     }
 
-    # detailed kf data
+    # Save detailed keyframe data
     for i in range(len(keyframes)):
         kf = keyframes[i]
         kf_data = {
@@ -197,13 +206,13 @@ def save_slam_state(save_dir, keyframes, retrieval_database, factor_graph, state
         }
         keyframes_data['keyframe_data'].append(kf_data)
         
-        # traj data
+        # Add to trajectory data
         keyframes_data['trajectory_data']['poses'].append(kf.T_WC.data.cpu().numpy())
         keyframes_data['trajectory_data']['pose_timestamps'].append(timestamps[kf.frame_id] if kf.frame_id < len(timestamps) else 0)
         keyframes_data['trajectory_data']['pose_confidence'].append(kf_data['average_confidence'])
         keyframes_data['trajectory_data']['tracking_status'].append('TRACKING')  # Default, can be enhanced
 
-        # img -> npz
+        # Save images as compressed npz
         np.savez_compressed(
             slam_state_dir / f"keyframe_{i:06d}.npz",
             img=kf.img.cpu().numpy(),
@@ -212,10 +221,10 @@ def save_slam_state(save_dir, keyframes, retrieval_database, factor_graph, state
             timestamp=timestamps[kf.frame_id] if kf.frame_id < len(timestamps) else 0
         )
 
-    # kf metadata
+    # Save keyframes metadata
     torch.save(keyframes_data, slam_state_dir / "keyframes.pth")
 
-    # factor graph
+    # Save enhanced factor graph with relationship metadata
     graph_data = {
         'ii': factor_graph.ii.cpu(),
         'jj': factor_graph.jj.cpu(),
@@ -226,18 +235,19 @@ def save_slam_state(save_dir, keyframes, retrieval_database, factor_graph, state
         'Q_ii2jj': factor_graph.Q_ii2jj.cpu(),
         'Q_jj2ii': factor_graph.Q_jj2ii.cpu(),
         'edge_metadata': {
-            'creation_order': [],     
-            'edge_types': [],       
-            'edge_strengths': [],  
-            'optimization_history': []
+            'creation_order': [],      # Order edges were created
+            'edge_types': [],          # consecutive, loop_closure, relocalization
+            'edge_strengths': [],      # Number of matches or confidence
+            'optimization_history': [] # When each edge was optimized
         }
     }
     
-    # analyze edge for type
+    # Analyze edges to determine types and metadata
     ii_list = factor_graph.ii.cpu().tolist()
     jj_list = factor_graph.jj.cpu().tolist()
     
     for idx, (i, j) in enumerate(zip(ii_list, jj_list)):
+        # Determine edge type
         if abs(i - j) == 1:
             edge_type = 'consecutive'
         elif abs(i - j) <= 5:
@@ -248,26 +258,27 @@ def save_slam_state(save_dir, keyframes, retrieval_database, factor_graph, state
         graph_data['edge_metadata']['edge_types'].append(edge_type)
         graph_data['edge_metadata']['creation_order'].append(idx)
         
-        # edge strength
-        edge_strength = 1.0  # default
+        # Calculate edge strength (could be enhanced with actual match counts)
+        edge_strength = 1.0  # Default, can be calculated from actual matches
         graph_data['edge_metadata']['edge_strengths'].append(edge_strength)
 
     torch.save(graph_data, slam_state_dir / "factor_graph.pth")
 
-    # retrieval db
+    # Save enhanced retrieval database state
     retrieval_data = {
         'modelname': retrieval_database.modelname,
         'kf_counter': retrieval_database.kf_counter,
         'kf_ids': retrieval_database.kf_ids,
         'retrieval_history': {
-            'queries': [],  
-            'results': [],     
-            'query_frames': [],  
-            'database_evolution': []
+            'queries': [],        # History of all queries made
+            'results': [],        # Results for each query
+            'query_frames': [],   # Which frame made each query
+            'database_evolution': [] # How database grew over time
         }
     }
     
-    # save curr state of retrieval db
+    # Save retrieval history (this would need to be collected during runtime)
+    # For now, save current state
     for i, kf_id in enumerate(retrieval_database.kf_ids):
         retrieval_data['retrieval_history']['database_evolution'].append({
             'step': i,
@@ -277,17 +288,17 @@ def save_slam_state(save_dir, keyframes, retrieval_database, factor_graph, state
 
     torch.save(retrieval_data, slam_state_dir / "retrieval_db.pth")
 
-    # save system state
+    # Save current system state
     state_info = {
         'mode': states.get_mode().value if hasattr(states.get_mode(), 'value') else states.get_mode(),
         'last_frame_id': len(keyframes) - 1,
         'processing_complete': True,
         'save_timestamp': time.time(),
-        'config_snapshot': dict(config)  # store config
+        'config_snapshot': dict(config)  # Save configuration used
     }
     torch.save(state_info, slam_state_dir / "state_info.pth")
 
-    # summary
+    # Save a comprehensive summary for easy inspection
     summary = {
         'total_keyframes': len(keyframes),
         'total_edges': len(factor_graph.ii),
@@ -305,44 +316,43 @@ def save_slam_state(save_dir, keyframes, retrieval_database, factor_graph, state
     with open(slam_state_dir / "summary.yaml", 'w') as f:
         yaml.dump(summary, f, default_flow_style=False)
 
-    # save point cloud PLY file
-    print("Saving point cloud PLY file for point clicking...")
-    save_reconstruction(slam_state_dir, "point_cloud.ply", keyframes, 1.5)
-    print(f"Point cloud saved to {slam_state_dir / 'point_cloud.ply'}")
-
     print(f"Saved {len(keyframes)} keyframes, {len(factor_graph.ii)} edges, and complete trajectory")
     print(f"Trajectory spans {summary['processing_stats']['duration']:.2f} seconds")
     print(f"Summary saved to {slam_state_dir / 'summary.yaml'}")
 
 
 def load_slam_state(load_dir, model, keyframes, device="cuda", sequential_replay=True):
+    """
+    Enhanced load function that can replay the sequence in order without recomputation
+    """
     load_dir = Path(load_dir)
     
     print(f"Loading enhanced SLAM state from {load_dir}")
 
-    # load metadata
+    # Load sequence metadata first
     sequence_metadata = torch.load(load_dir / "sequence_metadata.pth", map_location=device)
     print(f"Loading sequence with {sequence_metadata['total_frames_processed']} frames, {sequence_metadata['keyframe_count']} keyframes")
 
-    # load intrinsics
+    # Load intrinsics
     K = None
     if 'intrinsics' in sequence_metadata and config["use_calib"]:
         K = torch.from_numpy(sequence_metadata['intrinsics']).to(device, dtype=torch.float32)
         keyframes.set_intrinsics(K)
 
-    # clear existing kf
+    # Clear existing keyframes
     with keyframes.lock:
         keyframes.n_size.value = 0
 
-    # load kf data
+    # Load keyframes data
     keyframes_data = torch.load(load_dir / "keyframes.pth", map_location=device)
     
     if sequential_replay:
-        # load kf in sequential order
+        # Load keyframes in insertion order for sequential replay
         insertion_order = sequence_metadata['keyframe_insertion_order']
         print(f"Replaying keyframe insertion in order: {insertion_order}")
         
         for insertion_step, frame_id in enumerate(insertion_order):
+            # Find the keyframe data for this frame_id
             kf_data = None
             kf_index = None
             for i, kf in enumerate(keyframes_data['keyframe_data']):
@@ -357,10 +367,10 @@ def load_slam_state(load_dir, model, keyframes, device="cuda", sequential_replay
                 
             print(f"Inserting keyframe {insertion_step + 1}/{len(insertion_order)}: frame_id={frame_id}")
             
-            # load img for kf
+            # Load images for this keyframe
             images = np.load(load_dir / f"keyframe_{kf_index:06d}.npz")
             
-            # recreate frame
+            # Recreate the frame
             frame = Frame(
                 frame_id=kf_data['frame_id'],
                 img=torch.from_numpy(images['img']).to(device),
@@ -381,10 +391,10 @@ def load_slam_state(load_dir, model, keyframes, device="cuda", sequential_replay
             
             keyframes.append(frame)
             
-            # delay for debugging
-            # time.sleep(1)
+            # Optional: Add small delay to simulate real-time replay
+            # time.sleep(0.01)
     else:
-        # load all kf
+        # Load all keyframes at once (original behavior)
         for i, kf_data in enumerate(keyframes_data['keyframe_data']):
             images = np.load(load_dir / f"keyframe_{i:06d}.npz")
             
@@ -408,9 +418,10 @@ def load_slam_state(load_dir, model, keyframes, device="cuda", sequential_replay
             
             keyframes.append(frame)
 
-    # load factor graph
+    # Create new factor graph
     factor_graph = FactorGraph(model, keyframes, K, device)
 
+    # Load factor graph data with enhanced metadata
     graph_data = torch.load(load_dir / "factor_graph.pth", map_location=device)
     factor_graph.ii = graph_data['ii']
     factor_graph.jj = graph_data['jj']
@@ -421,7 +432,7 @@ def load_slam_state(load_dir, model, keyframes, device="cuda", sequential_replay
     factor_graph.Q_ii2jj = graph_data['Q_ii2jj']
     factor_graph.Q_jj2ii = graph_data['Q_jj2ii']
     
-    # edge stats
+    # Print edge statistics
     if 'edge_metadata' in graph_data:
         edge_types = graph_data['edge_metadata']['edge_types']
         consecutive_edges = edge_types.count('consecutive')
@@ -429,16 +440,20 @@ def load_slam_state(load_dir, model, keyframes, device="cuda", sequential_replay
         loop_closures = edge_types.count('loop_closure')
         print(f"Loaded edges: {consecutive_edges} consecutive, {local_edges} local, {loop_closures} loop closures")
 
-    # load retrieval db
+    # Load retrieval database
     retrieval_data = torch.load(load_dir / "retrieval_db.pth", map_location=device)
+
+    # Create new retrieval database
     retrieval_database = load_retriever(model, retrieval_data['modelname'], device=device)
+
+    # Restore retrieval database state
     retrieval_database.kf_counter = retrieval_data['kf_counter']
     retrieval_database.kf_ids = retrieval_data['kf_ids']
 
-    # rebuild IVF w/ kf
+    # Rebuild IVF with keyframes in the correct order
     print("Rebuilding retrieval database...")
     if sequential_replay:
-        # insertion order
+        # Rebuild in insertion order
         for insertion_step, frame_id in enumerate(sequence_metadata['keyframe_insertion_order']):
             kf_idx = sequence_metadata['frame_to_keyframe_mapping'][frame_id]
             frame = keyframes[kf_idx]
@@ -451,6 +466,7 @@ def load_slam_state(load_dir, model, keyframes, device="cuda", sequential_replay
             if (insertion_step + 1) % 10 == 0:
                 print(f"Rebuilt retrieval DB: {insertion_step + 1}/{len(sequence_metadata['keyframe_insertion_order'])}")
     else:
+        # Rebuild all at once
         for i in range(len(keyframes)):
             frame = keyframes[i]
             feat = retrieval_database.prep_features(frame.feat)
@@ -458,16 +474,17 @@ def load_slam_state(load_dir, model, keyframes, device="cuda", sequential_replay
             id_np = i * np.ones(feat_np.shape[0], dtype=np.int64)
             retrieval_database.add_to_database(feat_np, id_np, None)
 
-    # load timestamps and traj data
+    # Load timestamps and trajectory data
     timestamps = sequence_metadata['timestamps']
     trajectory_data = keyframes_data['trajectory_data']
     
     print(f"Loaded trajectory with {len(trajectory_data['poses'])} poses")
     print(f"Trajectory confidence range: {min(trajectory_data['pose_confidence']):.3f} - {max(trajectory_data['pose_confidence']):.3f}")
 
-    # load state info
+    # Load state info
     state_info = torch.load(load_dir / "state_info.pth", map_location=device)
     
+    # Print summary
     print(f"Successfully loaded:")
     print(f"  - {len(keyframes)} keyframes")
     print(f"  - {len(factor_graph.ii)} edges") 

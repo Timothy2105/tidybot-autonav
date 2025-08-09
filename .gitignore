@@ -3,6 +3,12 @@ checkpoints/
 follow-traj/
 saved-states/
 videos/
+calib-results/
+camera_position.txt
+movement_results.txt
+robot_results.txt
+robot_commands.txt
+initial_yaw.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
