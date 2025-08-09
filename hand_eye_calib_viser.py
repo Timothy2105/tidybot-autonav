@@ -10,7 +10,7 @@ from plyfile import PlyData
 import os
 
 # baseline yaw file path
-INITIAL_YAW_FILE = "initial_yaw.txt"
+INITIAL_YAW_FILE = "calib-results/runtime/initial_yaw.txt"
 
 
 def save_initial_yaw_to_file(yaw_deg, path = INITIAL_YAW_FILE):
@@ -59,7 +59,7 @@ def load_transformation_matrix():
 
 
 def read_camera_position():
-    camera_position_file = "camera_position.txt"
+    camera_position_file = "calib-results/runtime/camera_position.txt"
     max_retries = 100 
     retry_count = 0
     
@@ -145,13 +145,14 @@ def calculate_movement(point_a, point_b):
 
 
 def save_movement_result(result, filename):
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, 'w') as f:
         json.dump(result, f, indent=2)
     print(f"Movement result saved to {filename}")
 
 
 def send_tidybot_command(tidybot_command):
-    command_file = "robot_commands.txt"
+    command_file = "calib-results/runtime/robot_commands.txt"
     
     # Format: {'type': 'tidybot_command', 'command': [y, x, theta]}
     command = {
@@ -160,6 +161,7 @@ def send_tidybot_command(tidybot_command):
     }
     
     try:
+        os.makedirs(os.path.dirname(command_file), exist_ok=True)
         with open(command_file, 'w') as f:
             json.dump(command, f, indent=2)
         print(f"Command sent to send_cmd.py: {command}")
@@ -252,7 +254,7 @@ def process_clicked_point(clicked_point, transformation_matrix):
     current_camera_position, current_quaternion, _ = read_camera_position()
     
     if current_camera_position is None:
-        print("Could not read current camera position from camera_position.txt")
+        print("Could not read current camera position from calib-results/runtime/camera_position.txt")
         print("Make sure main.py is running and writing camera position")
         return None
     
@@ -337,7 +339,7 @@ def process_clicked_point(clicked_point, transformation_matrix):
             print(" Failed to send TidyBot command")
         
         # save result
-        save_movement_result(movement_result, "movement_results.txt")
+        save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
         print("Movement calculated and saved!")
         
         return {
@@ -534,6 +536,7 @@ if __name__ == "__main__":
 
     # reset yaw baseline
     try:
+        os.makedirs("calib-results/runtime", exist_ok=True)
         if os.path.exists(INITIAL_YAW_FILE):
             os.remove(INITIAL_YAW_FILE)
             print(f"Cleared baseline yaw file: {INITIAL_YAW_FILE}")
@@ -546,7 +549,7 @@ if __name__ == "__main__":
     print("Movement calculation system ready!")
     
     print("Click any point to calculate movement from current camera position to that destination.")
-    print("Live camera position will be read from camera_position.txt (make sure main.py is running)")
+    print("Live camera position will be read from calib-results/runtime/camera_position.txt (make sure main.py is running)")
     
     # add red dot for current camera position
     print("Adding red dot for current camera position...")
@@ -847,13 +850,14 @@ if __name__ == "__main__":
     def check_robot_status():
         global robot_moving
         try:
-            if os.path.exists("robot_results.txt"):
-                with open("robot_results.txt", 'r') as f:
+            if os.path.exists("calib-results/runtime/robot_results.txt"):
+                with open("calib-results/runtime/robot_results.txt", 'r') as f:
                     content = f.read().strip()
                     if content:
                         result = json.loads(content)
                         if result.get('success', False):
-                            with open("robot_results.txt", 'w') as f:
+                            os.makedirs(os.path.dirname("calib-results/runtime/robot_results.txt"), exist_ok=True)
+                            with open("calib-results/runtime/robot_results.txt", 'w') as f:
                                 f.write("")
                             robot_moving = False
                             print("Robot movement completed!")

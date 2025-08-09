@@ -33,11 +33,12 @@ import os
 
 class RobotCommandSender:    
     def __init__(self):
-        self.command_file = "robot_commands.txt"
-        self.result_file = "robot_results.txt"
+        self.command_file = "calib-results/runtime/robot_commands.txt"
+        self.result_file = "calib-results/runtime/robot_results.txt"
     
     def send_command(self, command):
         try:
+            #os.makedirs(os.path.dirname(self.command_file), exist_ok=True)
             with open(self.command_file, 'w') as f:
                 json.dump(command, f, indent=2)
             return True
@@ -54,6 +55,7 @@ class RobotCommandSender:
                         content = f.read().strip()
                         if content:
                             # clear the file after reading
+                            os.makedirs(os.path.dirname(self.result_file), exist_ok=True)
                             with open(self.result_file, 'w') as f:
                                 f.write("")
                             return json.loads(content)
@@ -815,7 +817,8 @@ if __name__ == "__main__":
                             'quaternion': [float(q) for q in quaternion],  # [w, x, y, z]
                             'timestamp': time.time()
                         }
-                        with open('camera_position.txt', 'w') as f:
+                        os.makedirs("calib-results/runtime", exist_ok=True)
+                        with open('calib-results/runtime/camera_position.txt', 'w') as f:
                             json.dump(camera_data, f)
                 except Exception as e:
                     pass

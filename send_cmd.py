@@ -18,8 +18,8 @@ class RobotCommandServer:
         self.robot_port = robot_port
         self.robot_interface = None
         self.running = True
-        self.command_file = "robot_commands.txt"
-        self.result_file = "robot_results.txt"
+        self.command_file = "calib-results/runtime/robot_commands.txt"
+        self.result_file = "calib-results/runtime/robot_results.txt"
         
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -65,6 +65,7 @@ class RobotCommandServer:
                 with open(self.command_file, 'r') as f:
                     content = f.read().strip()
                     if content:
+                        os.makedirs(os.path.dirname(self.command_file), exist_ok=True)
                         with open(self.command_file, 'w') as f:
                             f.write("")
                         return json.loads(content)
@@ -74,6 +75,7 @@ class RobotCommandServer:
     
     def write_result(self, result):
         try:
+            os.makedirs(os.path.dirname(self.result_file), exist_ok=True)
             with open(self.result_file, 'w') as f:
                 json.dump(result, f, indent=2)
         except Exception as e:
@@ -238,8 +240,8 @@ class RobotCommandServer:
         
         print(" Robot command server ready")
         print("Waiting for commands from main.py...")
-        print("Commands will be read from 'robot_commands.txt'")
-        print("Results will be written to 'robot_results.txt'")
+        print("Commands will be read from 'calib-results/runtime/robot_commands.txt'")
+        print("Results will be written to 'calib-results/runtime/robot_results.txt'")
         print("Press Ctrl+C to stop the server")
         
         # clear any existing command file

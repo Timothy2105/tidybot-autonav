@@ -23,7 +23,7 @@ def get_camera_position_from_slam():
     """
     try:
         # Look for a file that contains the current camera position and orientation
-        camera_pos_file = Path("camera_position.txt")
+        camera_pos_file = Path("calib-results/runtime/camera_position.txt")
         if camera_pos_file.exists():
             with open(camera_pos_file, 'r') as f:
                 data = json.load(f)
