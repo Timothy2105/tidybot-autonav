@@ -6,7 +6,7 @@ import argparse
 import threading
 import json
 from scipy.spatial.transform import Rotation as R
-from plyfile import PlyData
+from plyfile import PlyData, PlyElement
 import os
 
 # baseline yaw file path
@@ -367,6 +367,32 @@ def load_ply_file(ply_path):
     print(f"Loaded {len(points)} points from PLY file")
     
     return points, colors
+
+
+def save_ply_file(points, colors, output_path):
+    print(f"Saving transformed point cloud to: {output_path}")
+    
+    # ensure colors are in 0-255 range
+    if colors.max() <= 1.0:
+        colors_int = (colors * 255).astype(np.uint8)
+    else:
+        colors_int = colors.astype(np.uint8)
+    
+    # create vertex array for PLY format
+    vertices = np.array([(points[i,0], points[i,1], points[i,2], 
+                         colors_int[i,0], colors_int[i,1], colors_int[i,2]) 
+                        for i in range(len(points))],
+                       dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+                              ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')])
+    
+    # create PLY element
+    vertex_element = PlyElement.describe(vertices, 'vertex')
+    
+    # ensure directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    PlyData([vertex_element]).write(output_path)
+    print(f"Saved {len(points)} points to PLY file: {output_path}")
 
 
 # convert degrees to rotation matrix for z-axis
@@ -740,6 +766,10 @@ if __name__ == "__main__":
     # create transformed point cloud by applying transformation to every point
     print("Creating transformed point cloud...")
     transformed_points = apply_transformation_to_points(original_points, transformed_axes)
+    
+    # save transformed point cloud as PLY file
+    transformed_ply_path = os.path.join("calib-results", "transformed_pointcloud.ply")
+    save_ply_file(transformed_points, original_colors, transformed_ply_path)
     
     # save transformation matrices to calib-results directory
     if args.save:
