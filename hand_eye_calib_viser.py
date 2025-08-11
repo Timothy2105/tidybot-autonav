@@ -555,6 +555,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hand-eye calibration visualization tool")
     parser.add_argument("--save", action="store_true", 
                        help="Save transformation matrices to calib-results directory")
+    parser.add_argument("--saved-folder", required=True,
+                       help="Path to saved state folder containing point_cloud.ply (e.g., saved-states/test-recalib)")
     args = parser.parse_args()
 
     server = viser.ViserServer()
@@ -748,8 +750,14 @@ if __name__ == "__main__":
     print(f"Hand-eye calibration transformation matrix:")
     print(T_cam2base)
 
-    # load the ply file
-    ply_file_path = "saved-states/test-recalib/point_cloud.ply"
+    # load the ply file from specified save folder
+    ply_file_path = os.path.join(args.saved_folder, "point_cloud.ply")
+    if not os.path.exists(ply_file_path):
+        print(f"Error: point_cloud.ply not found in {args.saved_folder}")
+        print(f"Expected file: {ply_file_path}")
+        exit(1)
+    
+    print(f"Loading point cloud from: {ply_file_path}")
     original_points, original_colors = load_ply_file(ply_file_path)
 
     # keep original points (no rotation)
