@@ -494,7 +494,7 @@ def apply_transformation_to_points(points, transformation_matrix):
 # some hardcoded eyeballed rotations to align transformed point cloud with original axes
 def create_final_transformation_matrix(hand_eye_transform):
     # y-axis rotation
-    y_angle_rad = np.radians(-25)
+    y_angle_rad = np.radians(-2)
     cos_y = np.cos(y_angle_rad)
     sin_y = np.sin(y_angle_rad)
     
@@ -506,7 +506,7 @@ def create_final_transformation_matrix(hand_eye_transform):
     ])
     
     # z-axis rotation
-    z_angle_rad = np.radians(-5)
+    z_angle_rad = np.radians(3)
     cos_z = np.cos(z_angle_rad)
     sin_z = np.sin(z_angle_rad)
     
@@ -518,7 +518,7 @@ def create_final_transformation_matrix(hand_eye_transform):
     ])
     
     # x-axis rotation
-    x_angle_rad = np.radians(-12)
+    x_angle_rad = np.radians(-9)
     cos_x = np.cos(x_angle_rad)
     sin_x = np.sin(x_angle_rad)
     
@@ -532,7 +532,7 @@ def create_final_transformation_matrix(hand_eye_transform):
     # up on y-axis
     translation_matrix = np.array([
         [1, 0, 0, 0],
-        [0, 1, 0, 0.4],
+        [0, 1, 0, 0.28],
         [0, 0, 1, 0],
         [0, 0, 0, 1]
     ])
@@ -555,6 +555,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hand-eye calibration visualization tool")
     parser.add_argument("--save", action="store_true", 
                        help="Save transformation matrices to calib-results directory")
+    parser.add_argument("--save-transformed-ply", action="store_true",
+                       help="Save the transformed point cloud as PLY file")
     parser.add_argument("--saved-folder", required=True,
                        help="Path to saved state folder containing point_cloud.ply (e.g., saved-states/test-recalib)")
     args = parser.parse_args()
@@ -776,8 +778,9 @@ if __name__ == "__main__":
     transformed_points = apply_transformation_to_points(original_points, transformed_axes)
     
     # save transformed point cloud as PLY file
-    transformed_ply_path = os.path.join("calib-results", "transformed_pointcloud.ply")
-    save_ply_file(transformed_points, original_colors, transformed_ply_path)
+    if args.save_transformed_ply:
+        transformed_ply_path = os.path.join("calib-results", "transformed_pointcloud.ply")
+        save_ply_file(transformed_points, original_colors, transformed_ply_path)
     
     # save transformation matrices to calib-results directory
     if args.save:
