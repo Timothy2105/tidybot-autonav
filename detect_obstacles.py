@@ -149,48 +149,85 @@ def create_obstacle_map(heightmap, height_threshold=0.05, floor_height=None):
     return obstacle_map
 
 
-def apply_erosion_to_obstacles(obstacle_map, kernel_size=3):
-    """Apply erosion filter to obstacle cells (value 1) in the planning map."""
-    # if kernel_size is 0, return original map (no erosion)
-    if kernel_size == 0:
-        print("Erosion disabled (kernel_size=0)")
+def apply_morphological_operations(obstacle_map, erode_size=3, dilate_size=2):
+    # if both sizes are 0, return original map
+    if erode_size == 0 and dilate_size == 0:
+        print("Morphological operations disabled (both sizes = 0)")
         return obstacle_map.copy()
     
-    # create a copy of the original map
-    eroded_map = obstacle_map.copy()
+    processed_map = obstacle_map.copy()
     
-    # create binary mask for obstacles only
     obstacle_mask = (obstacle_map == 1).astype(np.uint8)
     
-    # create erosion kernel (small square)
-    kernel = np.ones((kernel_size, kernel_size), np.uint8)
-    
-    # apply erosion to obstacle mask
-    eroded_obstacles = cv2.erode(obstacle_mask, kernel, iterations=1)
-    
-    # update the map: convert eroded obstacle pixels to free space
-    # where obstacles were eroded away, set to free (0)
-    eroded_away = (obstacle_mask == 1) & (eroded_obstacles == 0)
-    eroded_map[eroded_away] = 0
-    
-    # stats
     original_obstacles = np.sum(obstacle_map == 1)
-    new_obstacles = np.sum(eroded_map == 1)
-    eroded_count = original_obstacles - new_obstacles
     
-    print(f"Erosion with {kernel_size}x{kernel_size} kernel:")
+    # erosion
+    if erode_size > 0:
+        erode_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (erode_size, erode_size))
+        eroded_obstacles = cv2.erode(obstacle_mask, erode_kernel, iterations=1)
+        
+        # update map after erosion
+        processed_map = obstacle_map.copy()
+        eroded_away = (obstacle_mask == 1) & (eroded_obstacles == 0)
+        processed_map[eroded_away] = 0
+        
+        after_erosion_obstacles = np.sum(processed_map == 1)
+        eroded_count = original_obstacles - after_erosion_obstacles
+        
+        print(f"Erosion with {erode_size}x{erode_size} kernel:")
+        print(f"  Original obstacles: {original_obstacles}")
+        print(f"  After erosion: {after_erosion_obstacles}")
+        print(f"  Eroded away: {eroded_count} cells")
+    else:
+        eroded_obstacles = obstacle_mask
+        after_erosion_obstacles = original_obstacles
+        print("Erosion skipped (erode_size = 0)")
+    
+    # dilation
+    if dilate_size > 0:
+        dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_size, dilate_size))
+        dilated_obstacles = cv2.dilate(eroded_obstacles, dilate_kernel, iterations=1)
+        
+        final_map = processed_map.copy()
+        
+        free_mask = (processed_map == 0)
+        new_obstacles_from_dilation = dilated_obstacles & free_mask
+        final_map[new_obstacles_from_dilation == 1] = 1
+        
+        after_dilation_obstacles = np.sum(final_map == 1)
+        dilated_added = after_dilation_obstacles - after_erosion_obstacles
+        
+        print(f"Dilation with {dilate_size}x{dilate_size} kernel:")
+        print(f"  After erosion: {after_erosion_obstacles}")
+        print(f"  After dilation: {after_dilation_obstacles}")
+        print(f"  Dilated added: {dilated_added} cells")
+        
+        processed_map = final_map
+    else:
+        print("Dilation skipped (dilate_size = 0)")
+    
+    final_obstacles = np.sum(processed_map == 1)
+    net_change = final_obstacles - original_obstacles
+    
+    print(f"Final result:")
     print(f"  Original obstacles: {original_obstacles}")
-    print(f"  After erosion: {new_obstacles}")
-    print(f"  Eroded away: {eroded_count} cells")
+    print(f"  Final obstacles: {final_obstacles}")
+    print(f"  Net change: {net_change:+d} cells")
     
-    return eroded_map
+    return processed_map
 
 
-def visualize_maps(heightmap, obstacle_map, x_edges, z_edges, save_path=None, map_type="Obstacle", erosion_size=3):
-    # create eroded planning map
-    eroded_map = apply_erosion_to_obstacles(obstacle_map, kernel_size=erosion_size)
+def visualize_maps(heightmap, obstacle_map, x_edges, z_edges, save_path=None, map_type="Obstacle", 
+                   erode_size=3, dilate_size=2):
+    # create planning map
+    processed_map = apply_morphological_operations(obstacle_map, erode_size=erode_size, dilate_size=dilate_size)
     
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
+    # create figure
+    fig = plt.figure(figsize=(15, 10))
+    
+    ax1 = plt.subplot(2, 2, 1)
+    ax2 = plt.subplot(2, 2, 2)
+    ax3 = plt.subplot(2, 1, 2)
     
     extent = [x_edges[0], x_edges[-1], z_edges[0], z_edges[-1]]
     
@@ -201,32 +238,43 @@ def visualize_maps(heightmap, obstacle_map, x_edges, z_edges, save_path=None, ma
     ax1.set_title('Height Map')
     plt.colorbar(im1, ax=ax1, label='Height (m)')
     
-    # obstacle map
+    # original obstacle map
     obstacle_display = obstacle_map.astype(float)
-    obstacle_display[obstacle_map == -1] = 0.5  # gray for unknown
+    obstacle_display[obstacle_map == -1] = 0.5
     
     im2 = ax2.imshow(obstacle_display, origin='lower', extent=extent, 
                      cmap='RdYlBu_r', vmin=0, vmax=1)
     ax2.set_xlabel('X (m)')
     ax2.set_ylabel('Z (m)')
-    ax2.set_title(f'{map_type} Map')
+    ax2.set_title(f'{map_type} Map (Original)')
     
-    # colorbar for obstacle map
     cbar2 = plt.colorbar(im2, ax=ax2)
     cbar2.set_ticks([0, 0.5, 1])
     cbar2.set_ticklabels(['Free', 'Unknown', 'Obstacle'])
     
-    # eroded obstacle map
-    eroded_display = eroded_map.astype(float)
-    eroded_display[eroded_map == -1] = 0.5  # gray for unknown
+    # processed obstacle map
+    processed_display = processed_map.astype(float)
+    processed_display[processed_map == -1] = 0.5
     
-    im3 = ax3.imshow(eroded_display, origin='lower', extent=extent, 
+    im3 = ax3.imshow(processed_display, origin='lower', extent=extent, 
                      cmap='RdYlBu_r', vmin=0, vmax=1)
     ax3.set_xlabel('X (m)')
     ax3.set_ylabel('Z (m)')
-    ax3.set_title(f'{map_type} Map (Eroded)')
     
-    # colorbar for eroded obstacle map
+    # create title
+    title_parts = []
+    if erode_size > 0:
+        title_parts.append(f"Eroded ({erode_size}x{erode_size})")
+    if dilate_size > 0:
+        title_parts.append(f"Dilated ({dilate_size}x{dilate_size})")
+    
+    if title_parts:
+        operation_title = " → ".join(title_parts)
+        ax3.set_title(f'{map_type} Map ({operation_title})')
+    else:
+        ax3.set_title(f'{map_type} Map (No Processing)')
+    
+    # colorbar
     cbar3 = plt.colorbar(im3, ax=ax3)
     cbar3.set_ticks([0, 0.5, 1])
     cbar3.set_ticklabels(['Free', 'Unknown', 'Obstacle'])
@@ -281,8 +329,10 @@ def main():
                        help="Which axis is height: 1 for Y-up (default), 2 for Z-up")
     parser.add_argument("--visualize", "-v", action="store_true", 
                        help="Show visualization with matplotlib")
-    parser.add_argument("--erosion", "-e", type=int, default=3,
+    parser.add_argument("--erode", type=int, default=3,
                        help="Erosion kernel size for obstacle map (default: 3). Use 0 to disable erosion.")
+    parser.add_argument("--dilate", type=int, default=2,
+                       help="Dilation kernel size for obstacle map (default: 2). Use 0 to disable dilation.")
     parser.add_argument("--use_open3d", action="store_true",
                        help="Use Open3D to load PLY file instead of plyfile")
     
@@ -371,7 +421,8 @@ def main():
         if args.output:
             viz_output = Path(args.output).with_name(Path(args.output).stem + "_visualization.png")
         map_type = "Planning" if use_clearance else "Obstacle"
-        visualize_maps(heightmap, obstacle_map, x_edges, z_edges, viz_output, map_type, args.erosion)
+        visualize_maps(heightmap, obstacle_map, x_edges, z_edges, viz_output, map_type, 
+                      args.erode, args.dilate)
     
     print("done!")
 
