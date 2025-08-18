@@ -149,8 +149,48 @@ def create_obstacle_map(heightmap, height_threshold=0.05, floor_height=None):
     return obstacle_map
 
 
-def visualize_maps(heightmap, obstacle_map, x_edges, z_edges, save_path=None, map_type="Obstacle"):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+def apply_erosion_to_obstacles(obstacle_map, kernel_size=3):
+    """Apply erosion filter to obstacle cells (value 1) in the planning map."""
+    # if kernel_size is 0, return original map (no erosion)
+    if kernel_size == 0:
+        print("Erosion disabled (kernel_size=0)")
+        return obstacle_map.copy()
+    
+    # create a copy of the original map
+    eroded_map = obstacle_map.copy()
+    
+    # create binary mask for obstacles only
+    obstacle_mask = (obstacle_map == 1).astype(np.uint8)
+    
+    # create erosion kernel (small square)
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    
+    # apply erosion to obstacle mask
+    eroded_obstacles = cv2.erode(obstacle_mask, kernel, iterations=1)
+    
+    # update the map: convert eroded obstacle pixels to free space
+    # where obstacles were eroded away, set to free (0)
+    eroded_away = (obstacle_mask == 1) & (eroded_obstacles == 0)
+    eroded_map[eroded_away] = 0
+    
+    # stats
+    original_obstacles = np.sum(obstacle_map == 1)
+    new_obstacles = np.sum(eroded_map == 1)
+    eroded_count = original_obstacles - new_obstacles
+    
+    print(f"Erosion with {kernel_size}x{kernel_size} kernel:")
+    print(f"  Original obstacles: {original_obstacles}")
+    print(f"  After erosion: {new_obstacles}")
+    print(f"  Eroded away: {eroded_count} cells")
+    
+    return eroded_map
+
+
+def visualize_maps(heightmap, obstacle_map, x_edges, z_edges, save_path=None, map_type="Obstacle", erosion_size=3):
+    # create eroded planning map
+    eroded_map = apply_erosion_to_obstacles(obstacle_map, kernel_size=erosion_size)
+    
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
     
     extent = [x_edges[0], x_edges[-1], z_edges[0], z_edges[-1]]
     
@@ -175,6 +215,21 @@ def visualize_maps(heightmap, obstacle_map, x_edges, z_edges, save_path=None, ma
     cbar2 = plt.colorbar(im2, ax=ax2)
     cbar2.set_ticks([0, 0.5, 1])
     cbar2.set_ticklabels(['Free', 'Unknown', 'Obstacle'])
+    
+    # eroded obstacle map
+    eroded_display = eroded_map.astype(float)
+    eroded_display[eroded_map == -1] = 0.5  # gray for unknown
+    
+    im3 = ax3.imshow(eroded_display, origin='lower', extent=extent, 
+                     cmap='RdYlBu_r', vmin=0, vmax=1)
+    ax3.set_xlabel('X (m)')
+    ax3.set_ylabel('Z (m)')
+    ax3.set_title(f'{map_type} Map (Eroded)')
+    
+    # colorbar for eroded obstacle map
+    cbar3 = plt.colorbar(im3, ax=ax3)
+    cbar3.set_ticks([0, 0.5, 1])
+    cbar3.set_ticklabels(['Free', 'Unknown', 'Obstacle'])
     
     plt.tight_layout()
     
@@ -226,6 +281,8 @@ def main():
                        help="Which axis is height: 1 for Y-up (default), 2 for Z-up")
     parser.add_argument("--visualize", "-v", action="store_true", 
                        help="Show visualization with matplotlib")
+    parser.add_argument("--erosion", "-e", type=int, default=3,
+                       help="Erosion kernel size for obstacle map (default: 3). Use 0 to disable erosion.")
     parser.add_argument("--use_open3d", action="store_true",
                        help="Use Open3D to load PLY file instead of plyfile")
     
@@ -314,7 +371,7 @@ def main():
         if args.output:
             viz_output = Path(args.output).with_name(Path(args.output).stem + "_visualization.png")
         map_type = "Planning" if use_clearance else "Obstacle"
-        visualize_maps(heightmap, obstacle_map, x_edges, z_edges, viz_output, map_type)
+        visualize_maps(heightmap, obstacle_map, x_edges, z_edges, viz_output, map_type, args.erosion)
     
     print("done!")
 
