@@ -873,9 +873,9 @@ def apply_transformation_to_points(points, transformation_matrix):
     return transformed_points
 
 # some hardcoded eyeballed rotations to align transformed point cloud with original axes
-def create_final_transformation_matrix(hand_eye_transform):
+def create_final_transformation_matrix(hand_eye_transform, y_rot_deg=5.0, z_rot_deg=3.0, x_rot_deg=-9.0, y_trans=0.28):
     # y-axis rotation
-    y_angle_rad = np.radians(-2)
+    y_angle_rad = np.radians(y_rot_deg)
     cos_y = np.cos(y_angle_rad)
     sin_y = np.sin(y_angle_rad)
     
@@ -887,7 +887,7 @@ def create_final_transformation_matrix(hand_eye_transform):
     ])
     
     # z-axis rotation
-    z_angle_rad = np.radians(3)
+    z_angle_rad = np.radians(z_rot_deg)
     cos_z = np.cos(z_angle_rad)
     sin_z = np.sin(z_angle_rad)
     
@@ -899,7 +899,7 @@ def create_final_transformation_matrix(hand_eye_transform):
     ])
     
     # x-axis rotation
-    x_angle_rad = np.radians(-9)
+    x_angle_rad = np.radians(x_rot_deg)
     cos_x = np.cos(x_angle_rad)
     sin_x = np.sin(x_angle_rad)
     
@@ -910,10 +910,10 @@ def create_final_transformation_matrix(hand_eye_transform):
         [0, 0,      0,      1]
     ])
     
-    # up on y-axis
+    # y-axis translation
     translation_matrix = np.array([
         [1, 0, 0, 0],
-        [0, 1, 0, 0.28],
+        [0, 1, 0, y_trans],
         [0, 0, 1, 0],
         [0, 0, 0, 1]
     ])
@@ -1187,6 +1187,11 @@ if __name__ == "__main__":
     print("Creating transformed point cloud...")
     transformed_points = apply_transformation_to_points(original_points, transformed_axes)
     
+    # make these variables accessible to slider callbacks
+    global transformed_points_global, transformed_axes_global
+    transformed_points_global = transformed_points
+    transformed_axes_global = transformed_axes
+    
     # always save transformed PLY for A* planning (do this first)
     transformed_ply_path = os.path.join("calib-results", "transformed_pointcloud.ply")
     print(f"Saving transformed point cloud for A* planning to: {transformed_ply_path}")
@@ -1294,6 +1299,138 @@ if __name__ == "__main__":
             initial_value="No point clicked yet",
             disabled=True
         )
+    
+    # add transformation adjustment sliders
+    with server.gui.add_folder("Transformation Adjustment"):
+        server.gui.add_markdown(
+            "**Adjust transformation parameters in real-time**\n\n"
+            "These sliders modify the hand-eye calibration transformation."
+        )
+        
+        y_rotation_slider = server.gui.add_slider(
+            "Y Rotation (degrees)",
+            min=-180.0,
+            max=180.0,
+            step=0.5,
+            initial_value=5.0
+        )
+        
+        z_rotation_slider = server.gui.add_slider(
+            "Z Rotation (degrees)", 
+            min=-180.0,
+            max=180.0,
+            step=0.5,
+            initial_value=3.0
+        )
+        
+        x_rotation_slider = server.gui.add_slider(
+            "X Rotation (degrees)",
+            min=-180.0, 
+            max=180.0,
+            step=0.5,
+            initial_value=-9.0
+        )
+        
+        y_translation_slider = server.gui.add_slider(
+            "Y Translation (meters)",
+            min=-5.0,
+            max=5.0, 
+            step=0.01,
+            initial_value=0.28
+        )
+        
+        reset_button = server.gui.add_button("Reset to Defaults")
+        save_button = server.gui.add_button("Save Current Values")
+    
+    # function to update transformation based on slider values
+    def update_transformation():
+        global transformed_points_global, transformed_axes_global
+        
+        # get current slider values
+        y_rot = y_rotation_slider.value
+        z_rot = z_rotation_slider.value  
+        x_rot = x_rotation_slider.value
+        y_trans = y_translation_slider.value
+        
+        # recalculate transformation matrix
+        hand_eye_transform = np.linalg.inv(T_cam2base)
+        transformed_axes_global = create_final_transformation_matrix(
+            hand_eye_transform, y_rot, z_rot, x_rot, y_trans
+        )
+        
+        # recalculate transformed points
+        transformed_points_global = apply_transformation_to_points(original_points, transformed_axes_global)
+        
+        # update point cloud visualization
+        try:
+            server.scene["/transformed_pointcloud"].remove()
+        except:
+            pass
+        
+        server.scene.add_point_cloud(
+            "/transformed_pointcloud",
+            points=transformed_points_global,
+            colors=original_colors,
+            point_size=0.003,
+        )
+        
+        # update transformed axes
+        try:
+            server.scene["/transformed_axes"].remove()
+        except:
+            pass
+        
+        transformed_rotation = R.from_matrix(transformed_axes_global[:3, :3]).as_quat()
+        transformed_quaternion = np.array([transformed_rotation[3], transformed_rotation[0], transformed_rotation[1], transformed_rotation[2]])
+        transformed_position = transformed_axes_global[:3, 3]
+        server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
+        
+        print(f"Updated transformation: Y={y_rot:.1f}°, Z={z_rot:.1f}°, X={x_rot:.1f}°, Y_trans={y_trans:.3f}m")
+    
+    # add callbacks to sliders
+    @y_rotation_slider.on_update
+    def _(_):
+        update_transformation()
+    
+    @z_rotation_slider.on_update  
+    def _(_):
+        update_transformation()
+        
+    @x_rotation_slider.on_update
+    def _(_):
+        update_transformation()
+        
+    @y_translation_slider.on_update
+    def _(_):
+        update_transformation()
+    
+    # reset button callback
+    @reset_button.on_click
+    def _(_):
+        y_rotation_slider.value = 5.0
+        z_rotation_slider.value = 3.0
+        x_rotation_slider.value = -9.0
+        y_translation_slider.value = 0.28
+        update_transformation()
+    
+    # save button callback
+    @save_button.on_click
+    def _(_):
+        y_rot = y_rotation_slider.value
+        z_rot = z_rotation_slider.value
+        x_rot = x_rotation_slider.value
+        y_trans = y_translation_slider.value
+        
+        print("="*50)
+        print("CURRENT TRANSFORMATION VALUES:")
+        print(f"Y Rotation: {y_rot:.1f} degrees")
+        print(f"Z Rotation: {z_rot:.1f} degrees") 
+        print(f"X Rotation: {x_rot:.1f} degrees")
+        print(f"Y Translation: {y_trans:.3f} meters")
+        print("="*50)
+        print("To use these values permanently, update the function:")
+        print(f"create_final_transformation_matrix(hand_eye_transform, {y_rot}, {z_rot}, {x_rot}, {y_trans})")
+        print("="*50)
     
     # keep track of active marker handles
     active_marker_handles = {}
@@ -1480,7 +1617,7 @@ if __name__ == "__main__":
                         point_size=0.05,
                     )
                     
-                    # create 4x4 camera transformation matrix
+                    # 4x4 camera transformation matrix
                     camera_transform = create_camera_transform_matrix(position, quaternion)
                     
                     # apply hand-eye calibration transformation to get world coordinates
