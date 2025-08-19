@@ -68,9 +68,9 @@ def read_camera_position():
             try:
                 with open(camera_position_file, 'r') as f:
                     content = f.read().strip()
-                    if not content:  # File is empty
+                    if not content: 
                         retry_count += 1
-                        time.sleep(0.01)  # Small delay before retry
+                        time.sleep(0.01)  
                         continue
                     
                     data = json.loads(content)
@@ -80,22 +80,18 @@ def read_camera_position():
                     
                     return position, quaternion, timestamp
             except (json.JSONDecodeError, KeyError, ValueError, OSError) as e:
-                # Keep retrying on any error
                 retry_count += 1
-                time.sleep(0.01)  # Small delay before retry
+                time.sleep(0.01)  
                 continue
             except Exception as e:
-                # Keep retrying on any other error
                 retry_count += 1
-                time.sleep(0.01)  # Small delay before retry
+                time.sleep(0.01)  
                 continue
         else:
-            # File doesn't exist, wait a bit and retry
             retry_count += 1
-            time.sleep(0.01)  # Small delay before retry
+            time.sleep(0.01)  
             continue
     
-    # If we've exhausted all retries, return None
     return None, None, None
 
 
@@ -151,10 +147,199 @@ def save_movement_result(result, filename):
     print(f"Movement result saved to {filename}")
 
 
+def save_planning_maps_json(heightmap, planning_map, eroded_map, x_edges, z_edges, output_dir="calib-results"):
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # prepare grid info
+    grid_info = {
+        'height': heightmap.shape[0],
+        'width': heightmap.shape[1],
+        'x_min': float(x_edges[0]),
+        'x_max': float(x_edges[-1]),
+        'z_min': float(z_edges[0]),
+        'z_max': float(z_edges[-1]),
+        'cell_size': float(x_edges[1] - x_edges[0]),
+        'coordinate_system': 'world coordinates (meters)',
+        'map_values': {
+            'free': 0,
+            'obstacle': 1,
+            'unknown': -1
+        }
+    }
+    
+    # save heightmap
+    heightmap_data = heightmap.copy()
+    heightmap_data[np.isnan(heightmap_data)] = -999.0
+    
+    planning_data = {
+        'grid_info': grid_info,
+        'heightmap': heightmap_data.tolist(),
+        'planning_map': planning_map.tolist(),
+        'eroded_map': eroded_map.tolist()
+    }
+    
+    # save as JSON
+    json_path = os.path.join(output_dir, "planning_maps.json")
+    with open(json_path, 'w') as f:
+        json.dump(planning_data, f, indent=2)
+    print(f"Planning maps saved to: {json_path}")
+    
+    return json_path
+
+
+def generate_planning_maps():
+    try:
+        ply_path = "calib-results/transformed_pointcloud.ply"
+        if not os.path.exists(ply_path):
+            print(f"Error: Transformed point cloud not found at {ply_path}")
+            return False
+        
+        print("Generating planning maps from transformed point cloud...")
+        print(f"Using PLY file: {ply_path}")
+        
+        import detect_obstacles
+        
+        # arguments for detect_obstacles.py
+        class Args:
+            def __init__(self):
+                self.input = ply_path
+                self.output = None
+                self.cell_size = 0.10
+                self.height_threshold = [0.3, 1.3]
+                self.viz_clip = [-0.1, 2.0]
+                self.xlim = None
+                self.zlim = None
+                self.height_axis = 1
+                self.visualize = False
+                self.erode = 5
+                self.dilate = 2
+                self.use_open3d = False
+        
+        args = Args()
+        
+        if args.use_open3d:
+            points = detect_obstacles.load_xyz_from_ply_open3d(args.input)
+        else:
+            points = detect_obstacles.load_xyz_from_ply(args.input)
+        
+        print(f"Loaded {len(points)} points")
+        
+        # heightmap and planning map
+        print("Creating heightmap and planning map...")
+        heightmap, plan_map, x_edges, z_edges = detect_obstacles.heightmap_and_clearance(
+            points,
+            cell_size=args.cell_size,
+            height_axis=args.height_axis,
+            viz_clip=args.viz_clip,
+            clear_low=args.height_threshold[0],
+            clear_high=args.height_threshold[1]
+        )
+        
+        print(f"Created {heightmap.shape[0]}x{heightmap.shape[1]} grid")
+        print(f"Free cells: {np.sum(plan_map == 0)}")
+        print(f"Obstacle cells: {np.sum(plan_map == 1)}")
+        print(f"Unknown cells: {np.sum(plan_map == -1)}")
+        
+        # erode and dilate
+        print("Applying morphological operations...")
+        eroded_map = detect_obstacles.apply_morphological_operations(plan_map, erode_size=args.erode, dilate_size=args.dilate)
+        
+        # save planning maps
+        print("Saving planning maps...")
+        save_planning_maps_json(heightmap, plan_map, eroded_map, x_edges, z_edges)
+        
+        print("Planning maps generated successfully!")
+        return True
+        
+    except Exception as e:
+        import traceback
+        print(f"Error generating planning maps: {e}")
+        print("Full traceback:")
+        traceback.print_exc()
+        return False
+
+
+def load_astar_planner():
+    try:
+        json_path = "calib-results/planning_maps.json"
+        if not os.path.exists(json_path):
+            print(f"Error: Planning maps not found at {json_path}")
+            return None
+        
+        print(f"Loading A* planner from: {json_path}")
+        
+        # import A* planner
+        from astar_planner import AStarPlanner
+        
+        planner = AStarPlanner(json_path)
+        print("A* planner loaded successfully!")
+        
+        map_info = planner.get_map_info()
+        print("Map info:")
+        for key, value in map_info.items():
+            print(f"  {key}: {value}")
+        
+        return planner
+        
+    except Exception as e:
+        import traceback
+        print(f"Error loading A* planner: {e}")
+        print("Full traceback:")
+        traceback.print_exc()
+        return None
+
+
+def visualize_astar_path(server, path_waypoints):
+    try:
+        try:
+            server.scene["/astar_waypoints"].remove()
+        except:
+            pass
+        
+        if len(path_waypoints) < 1:
+            return
+        
+        # convert path to 3D points
+        path_points_3d = []
+        for x, z in path_waypoints:
+            path_points_3d.append([x, 0.3, z])
+        
+        path_points_3d = np.array(path_points_3d)
+        
+        # create colors for waypoints
+        waypoint_colors = []
+        for i in range(len(path_points_3d)):
+            if i == 0:
+                # start point - bright green
+                waypoint_colors.append([0.0, 1.0, 0.0])
+            elif i == len(path_points_3d) - 1:
+                # end point - bright red  
+                waypoint_colors.append([1.0, 0.0, 0.0])
+            else:
+                # intermediate points - bright blue
+                waypoint_colors.append([0.0, 0.5, 1.0])
+        
+        # add waypoint markers
+        server.scene.add_point_cloud(
+            "/astar_waypoints",
+            points=path_points_3d,
+            colors=np.array(waypoint_colors),
+            point_size=0.05,
+        )
+        
+        print(f"Visualized A* path with {len(path_waypoints)} waypoints:")
+        print(f"  Start: ({path_waypoints[0][0]:.2f}, {path_waypoints[0][1]:.2f})")
+        print(f"  Goal:  ({path_waypoints[-1][0]:.2f}, {path_waypoints[-1][1]:.2f})")
+        print(f"  {len(path_waypoints)-2} intermediate waypoints")
+        
+    except Exception as e:
+        print(f"Error visualizing A* waypoints: {e}")
+
+
 def send_tidybot_command(tidybot_command):
     command_file = "calib-results/runtime/robot_commands.txt"
     
-    # Format: {'type': 'tidybot_command', 'command': [y, x, theta]}
+    # {'type': 'tidybot_command', 'command': [y, x, theta]}
     command = {
         'type': 'tidybot_command',
         'command': tidybot_command
@@ -169,6 +354,159 @@ def send_tidybot_command(tidybot_command):
     except Exception as e:
         print(f"Error sending command: {e}")
         return False
+
+
+def wait_for_robot_completion(timeout=30.0):
+    """Wait for robot command to complete by monitoring result file."""
+    result_file = "calib-results/runtime/robot_results.txt"
+    start_time = time.time()
+    
+    print("  Waiting for robot completion...")
+    
+    while time.time() - start_time < timeout:
+        try:
+            if os.path.exists(result_file):
+                with open(result_file, 'r') as f:
+                    content = f.read().strip()
+                    if content:
+                        result = json.loads(content)
+                        if result.get('success', False):
+                            # clear result file for next command
+                            with open(result_file, 'w') as f:
+                                f.write("")
+                            return True
+                        elif 'success' in result and not result['success']:
+                            print(f"  Robot command failed: {result.get('message', 'Unknown error')}")
+                            return False
+        except Exception as e:
+            pass
+        
+        time.sleep(0.2)
+    
+    print(f"  Timeout waiting for robot completion ({timeout}s)")
+    return False
+
+
+# send in sequence
+def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw):
+    if not path_waypoints or len(path_waypoints) < 2:
+        print("No valid A* path to execute")
+        return False
+    
+    waypoint_commands = []
+    yaw_rad = np.radians(baseline_yaw)
+    
+    # convert each waypoint to TidyBot command
+    for i in range(1, len(path_waypoints)):  # skip first waypoint
+        prev_x, prev_z = path_waypoints[i-1]
+        curr_x, curr_z = path_waypoints[i]
+        
+        # calculate movement in world coordinates
+        world_x_movement = curr_x - prev_x
+        world_z_movement = curr_z - prev_z
+        
+        # apply baseline yaw transformation
+        global_x =  world_x_movement * np.cos(-yaw_rad) + world_z_movement * np.sin(-yaw_rad)
+        global_z = -world_x_movement * np.sin(-yaw_rad) + world_z_movement * np.cos(-yaw_rad)
+        
+        # tidybot command format: [y, x, theta]
+        tidybot_command = [global_z, global_x, 0.0]
+        waypoint_commands.append({
+            'waypoint': i,
+            'world_pos': (curr_x, curr_z),
+            'movement': (global_x, global_z),
+            'command': tidybot_command
+        })
+    
+    print(f"Generated {len(waypoint_commands)} waypoint commands:")
+    for i, cmd_data in enumerate(waypoint_commands):
+        print(f"  Step {i+1}: Move to ({cmd_data['world_pos'][0]:.2f}, {cmd_data['world_pos'][1]:.2f})")
+        print(f"           Command: [{cmd_data['command'][0]:.3f}, {cmd_data['command'][1]:.3f}, {cmd_data['command'][2]:.1f}]")
+    
+    # send waypoints sequentially, waiting for each to complete
+    for i, cmd_data in enumerate(waypoint_commands):
+        print(f"\nSending waypoint {i+1}/{len(waypoint_commands)}:")
+        print(f"  Target: ({cmd_data['world_pos'][0]:.2f}, {cmd_data['world_pos'][1]:.2f})")
+        print(f"  Command: {cmd_data['command']}")
+        
+        # send command
+        if send_tidybot_command(cmd_data['command']):
+            print(f"  Sent waypoint {i+1} successfully")
+            
+            # wait for completion
+            if wait_for_robot_completion():
+                print(f"  Waypoint {i+1} completed!")
+            else:
+                print(f"  Warning: Waypoint {i+1} may not have completed properly")
+        else:
+            print(f"  Failed to send waypoint {i+1}")
+            return False
+    
+    print(f"\nA* waypoint sequence completed! Executed {len(waypoint_commands)} waypoints.")
+    return True
+
+
+def get_next_waypoint_command():
+    sequence_file = "calib-results/runtime/astar_waypoint_sequence.json"
+    
+    try:
+        if not os.path.exists(sequence_file):
+            return None
+        
+        with open(sequence_file, 'r') as f:
+            sequence_data = json.load(f)
+        
+        if sequence_data['status'] != 'ready':
+            return None
+        
+        current_waypoint = sequence_data['current_waypoint']
+        total_waypoints = sequence_data['total_waypoints']
+        
+        if current_waypoint >= total_waypoints - 1:
+            # sequence completed
+            sequence_data['status'] = 'completed'
+            with open(sequence_file, 'w') as f:
+                json.dump(sequence_data, f, indent=2)
+            print("A* waypoint sequence completed!")
+            return None
+        
+        # get next waypoint command
+        next_waypoint_idx = current_waypoint + 1
+        next_command_data = sequence_data['commands'][next_waypoint_idx]
+        
+        # update sequence progress
+        sequence_data['current_waypoint'] = next_waypoint_idx
+        with open(sequence_file, 'w') as f:
+            json.dump(sequence_data, f, indent=2)
+        
+        print(f"Next waypoint ({next_waypoint_idx + 1}/{total_waypoints}): {next_command_data['command']}")
+        return next_command_data['command']
+        
+    except Exception as e:
+        print(f"Error getting next waypoint command: {e}")
+        return None
+
+
+def check_waypoint_sequence_status():
+    sequence_file = "calib-results/runtime/astar_waypoint_sequence.json"
+    
+    try:
+        if not os.path.exists(sequence_file):
+            return {'status': 'none', 'progress': None}
+        
+        with open(sequence_file, 'r') as f:
+            sequence_data = json.load(f)
+        
+        return {
+            'status': sequence_data['status'],
+            'current_waypoint': sequence_data['current_waypoint'],
+            'total_waypoints': sequence_data['total_waypoints'],
+            'progress': f"{sequence_data['current_waypoint'] + 1}/{sequence_data['total_waypoints']}"
+        }
+        
+    except Exception as e:
+        print(f"Error checking waypoint sequence status: {e}")
+        return {'status': 'error', 'progress': None}
 
 
 def add_camera_position_dot(server, transformation_matrix):    
@@ -249,7 +587,7 @@ def add_camera_position_dot(server, transformation_matrix):
         return None
 
 
-def process_clicked_point(clicked_point, transformation_matrix):
+def process_clicked_point(clicked_point, transformation_matrix, astar_planner=None, server=None):
     # get current camera position
     current_camera_position, current_quaternion, _ = read_camera_position()
     
@@ -284,14 +622,12 @@ def process_clicked_point(clicked_point, transformation_matrix):
     movement_result = calculate_movement(transformed_current, destination_point)
     
     if movement_result:
-        print(f"\nMOVEMENT CALCULATION RESULTS:")
-        print(f"   Current Position (Point A): {movement_result['point_a']}")
-        print(f"   Destination (Point B): {movement_result['point_b']}")
-        print(f"   Flattened Current: {movement_result['flat_a']}")
-        print(f"   Flattened Destination: {movement_result['flat_b']}")
-        print(f"   World X movement: {movement_result['x_movement']:.3f}m")
-        print(f"   World Y movement: {movement_result['y_movement']:.3f}m")
-        print(f"   World Z movement: {movement_result['z_movement']:.3f}m")
+        print(f"Movement calculation:")
+        print(f"  Current Position: {movement_result['point_a']}")
+        print(f"  Destination: {movement_result['point_b']}")
+        print(f"  World X movement: {movement_result['x_movement']:.3f}m")
+        print(f"  World Y movement: {movement_result['y_movement']:.3f}m")
+        print(f"  World Z movement: {movement_result['z_movement']:.3f}m")
         
         # transform world movement to robot global coordinates w/ baseline yaw
         world_x = movement_result['x_movement']
@@ -306,37 +642,82 @@ def process_clicked_point(clicked_point, transformation_matrix):
             transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
             current_signed_yaw, _ = get_camera_yaw_angle(transformed_rotation, forward_is_neg_z=False)
             baseline_yaw = ensure_initial_yaw_saved(current_signed_yaw)
-            print(f"   Baseline yaw not found; using current yaw {baseline_yaw:.1f}° and saving it.")
+            print(f"  Baseline yaw not found; using current yaw {baseline_yaw:.1f}° and saving it.")
         else:
             baseline_yaw = initial_yaw
-            print(f"   Using baseline yaw: {baseline_yaw:.1f}°")
+            print(f"  Using baseline yaw: {baseline_yaw:.1f}°")
         yaw_rad = np.radians(baseline_yaw)
         
         # apply 2D rotation transformation with baseline yaw
         global_x =  world_x * np.cos(-yaw_rad) + world_z * np.sin(-yaw_rad)
         global_z = -world_x * np.sin(-yaw_rad) + world_z * np.cos(-yaw_rad)
         
-        print(f"   Global X movement: {global_x:.3f}m")
-        print(f"   Global Y movement: {world_y:.3f}m")
-        print(f"   Global Z movement: {global_z:.3f}m")
-        print(f"   Using baseline yaw: {baseline_yaw:.1f} degrees")
+        print(f"  Global X movement: {global_x:.3f}m")
+        print(f"  Global Y movement: {world_y:.3f}m")
+        print(f"  Global Z movement: {global_z:.3f}m")
+        print(f"  Using baseline yaw: {baseline_yaw:.1f} degrees")
+        
+        # A* path planning
+        path_waypoints = None
+        if astar_planner is not None:
+            try:
+                print("A* path planning:")
+                start_x, start_z = transformed_current[0], transformed_current[2]
+                goal_x, goal_z = destination_point[0], destination_point[2]
+                
+                path_waypoints = astar_planner.plan_path(start_x, start_z, goal_x, goal_z, use_eroded=True)
+                
+                if path_waypoints:
+                    print(f"A* path found with {len(path_waypoints)} waypoints:")
+                    for i, (x, z) in enumerate(path_waypoints):
+                        print(f"  Waypoint {i}: ({x:.2f}, {z:.2f})")
+                    
+                    # visualize path in viser
+                    if server is not None:
+                        visualize_astar_path(server, path_waypoints)
+                    
+                    # send waypoint sequence to TidyBot
+                    if len(path_waypoints) > 1:
+                        print("Sending A* waypoint sequence to TidyBot...")
+                        if send_astar_waypoint_sequence(path_waypoints, transformed_current, baseline_yaw):
+                            # waypoint sequence sent successfully, skip direct movement
+                            save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
+                            print("A* waypoint sequence initiated!")
+                            
+                            return {
+                                'status': 'astar_sequence_started',
+                                'movement_result': movement_result,
+                                'waypoint_count': len(path_waypoints)
+                            }
+                        else:
+                            print("Failed to send A* waypoint sequence - falling back to direct movement")
+                    else:
+                        print("A* path has only start point - using direct movement")
+                else:
+                    print("A* planning failed - using direct movement")
+                    
+            except Exception as e:
+                print(f"A* planning error: {e}")
+                print("Falling back to direct movement")
+        else:
+            print("A* planner not available - using direct movement")
         
         # TidyBot commands
         tidybot_x = global_x
         tidybot_y = global_z 
         tidybot_theta = 0.0  # degrees
         
-        print(f"   TidyBot X movement (global): {tidybot_x:.3f}m")
-        print(f"   TidyBot Y movement (global): {tidybot_y:.3f}m")
-        print(f"   TidyBot rotation (theta): {tidybot_theta:.1f} degrees")
-        print(f"   TidyBot command: [{tidybot_y:.3f}, {tidybot_x:.3f}, {tidybot_theta:.1f}]")
+        print(f"  TidyBot X movement (global): {tidybot_x:.3f}m")
+        print(f"  TidyBot Y movement (global): {tidybot_y:.3f}m")
+        print(f"  TidyBot rotation (theta): {tidybot_theta:.1f} degrees")
+        print(f"  TidyBot command: [{tidybot_y:.3f}, {tidybot_x:.3f}, {tidybot_theta:.1f}]")
         
         # send command to send_cmd.py
         tidybot_command = [tidybot_y, tidybot_x, tidybot_theta]
         if send_tidybot_command(tidybot_command):
-            print(" TidyBot command sent successfully!")
+            print("TidyBot command sent successfully!")
         else:
-            print(" Failed to send TidyBot command")
+            print("Failed to send TidyBot command")
         
         # save result
         save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
@@ -578,7 +959,36 @@ if __name__ == "__main__":
     transformation_matrix = load_transformation_matrix()
     print("Movement calculation system ready!")
     
+    # generate planning maps and initialize A* planner
+    print("Initializing A* path planning...")
+    
+    # generate planning maps
+    print("Generating planning maps...")
+    planning_maps_generated = generate_planning_maps()
+    
+    astar_planner = None
+    if planning_maps_generated:
+        print("Planning maps generated successfully")
+        
+        # load A* planner
+        print("Loading A* planner...")
+        astar_planner = load_astar_planner()
+        
+        if astar_planner:
+            print("A* planner loaded successfully!")
+            print("A* path planning is ready!")
+        else:
+            print("Failed to load A* planner")
+    else:
+        print("Failed to generate planning maps")
+    
+    if astar_planner is None:
+        print("WARNING: A* planner failed to initialize")
+        print("Falling back to direct movement")
+    
     print("Click any point to calculate movement from current camera position to that destination.")
+    if astar_planner:
+        print("A* path planning will be used to find safe routes and visualize trajectories.")
     print("Live camera position will be read from calib-results/runtime/camera_position.txt (make sure main.py is running)")
     
     # add red dot for current camera position
@@ -777,10 +1187,14 @@ if __name__ == "__main__":
     print("Creating transformed point cloud...")
     transformed_points = apply_transformation_to_points(original_points, transformed_axes)
     
-    # save transformed point cloud as PLY file
+    # always save transformed PLY for A* planning (do this first)
+    transformed_ply_path = os.path.join("calib-results", "transformed_pointcloud.ply")
+    print(f"Saving transformed point cloud for A* planning to: {transformed_ply_path}")
+    save_ply_file(transformed_points, original_colors, transformed_ply_path)
+    
+    # also save if user requested it explicitly (redundant but clear)
     if args.save_transformed_ply:
-        transformed_ply_path = os.path.join("calib-results", "transformed_pointcloud.ply")
-        save_ply_file(transformed_points, original_colors, transformed_ply_path)
+        print("User also requested saving transformed PLY (already saved above)")
     
     # save transformation matrices to calib-results directory
     if args.save:
@@ -961,7 +1375,7 @@ if __name__ == "__main__":
                     coord_display.value = coord_str
                     
                     # Process clicked point for movement calculation
-                    process_clicked_point(closest_point, transformation_matrix)
+                    process_clicked_point(closest_point, transformation_matrix, astar_planner, server)
                     
                     # add a temporary marker at the clicked point
                     marker_name = f"/clicked_point_{time.time()}"

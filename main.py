@@ -397,6 +397,8 @@ if __name__ == "__main__":
                        help="Load prediction data and enable prediction visualization")
     parser.add_argument("--enable-click", action="store_true",
                        help="Enable point cloud clicking functionality to get 3D coordinates")
+    parser.add_argument("--keyframe-skip", type=int, default=1,
+                       help="Skip keyframes during insertion (e.g., --keyframe-skip 2 saves every 2nd keyframe, --keyframe-skip 3 saves every 3rd keyframe). Default is 1 (save all keyframes).")
 
     args = parser.parse_args()
     
@@ -406,6 +408,10 @@ if __name__ == "__main__":
 
     if args.follow_traj and not args.load_state:
         print("Error: --follow-traj requires --load-state to be specified")
+        sys.exit(1)
+    
+    if args.keyframe_skip < 1:
+        print("Error: --keyframe-skip must be >= 1")
         sys.exit(1)
 
     # Validation for hybrid mode
@@ -417,6 +423,9 @@ if __name__ == "__main__":
 
     if args.follow_traj:
         print("Trajectory following mode enabled - will find nearest keyframe and calculate movement")
+    
+    if args.keyframe_skip > 1:
+        print(f"Keyframe skipping enabled: saving every {args.keyframe_skip} keyframes (~{100/args.keyframe_skip:.1f}% reduction)")
 
     load_config(args.config)
     
@@ -676,6 +685,9 @@ if __name__ == "__main__":
 
     # track if calibration has already run
     calibration_ran = False
+    
+    # keyframe skip counter for --keyframe-skip functionality
+    keyframe_skip_counter = 0
 
     while True:
         mode = states.get_mode()
@@ -783,14 +795,22 @@ if __name__ == "__main__":
             raise Exception("Invalid mode")
 
         if add_new_kf:
-            keyframes.append(frame)
-            states.queue_global_optimization(len(keyframes) - 1)
-            # in single threaded mode, wait for the backend to finish
-            while config["single_thread"]:
-                with states.lock:
-                    if len(states.global_optimizer_tasks) == 0:
-                        break
-                time.sleep(0.01)
+            # apply keyframe skipping logic
+            keyframe_skip_counter += 1
+            should_add_keyframe = (keyframe_skip_counter % args.keyframe_skip == 0)
+            
+            if should_add_keyframe:
+                keyframes.append(frame)
+                states.queue_global_optimization(len(keyframes) - 1)
+                print(f"Added keyframe {len(keyframes)} (skip counter: {keyframe_skip_counter}, skip every {args.keyframe_skip})")
+                # in single threaded mode, wait for the backend to finish
+                while config["single_thread"]:
+                    with states.lock:
+                        if len(states.global_optimizer_tasks) == 0:
+                            break
+                    time.sleep(0.01)
+            else:
+                print(f"Skipped keyframe (skip counter: {keyframe_skip_counter}, skip every {args.keyframe_skip})")
         
         # track camera position continuously
         if args.load_state:  # only track position when we have a loaded state
