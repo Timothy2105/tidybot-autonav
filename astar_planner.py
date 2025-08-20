@@ -71,8 +71,96 @@ class AStarPlanner:
     def heuristic(self, row1: int, col1: int, row2: int, col2: int) -> float:
         return np.sqrt((row1 - row2)**2 + (col1 - col2)**2)
     
+    def _bresenham_line_cells(self, r0: int, c0: int, r1: int, c1: int):
+        """Yield grid cells on a line from (r0,c0) to (r1,c1), inclusive."""
+        dr = abs(r1 - r0); dc = abs(c1 - c0)
+        sr = 1 if r0 < r1 else -1
+        sc = 1 if c0 < c1 else -1
+        err = (dr if dr > dc else -dc) // 2
+        r, c = r0, c0
+        while True:
+            yield r, c
+            if r == r1 and c == c1:
+                break
+            e2 = err
+            if e2 > -dr:
+                err -= dc
+                r += sr
+            if e2 < dc:
+                err += dr
+                c += sc
+
+    def _line_of_sight_free(self, r0: int, c0: int, r1: int, c1: int, use_eroded: bool = True) -> bool:
+        """True if every cell along the line is free."""
+        grid = self.eroded_map if use_eroded else self.planning_map
+        for rr, cc in self._bresenham_line_cells(r0, c0, r1, c1):
+            if not self.is_valid(rr, cc) or grid[rr, cc] != 0:
+                return False
+        return True
+
+    def _reconstruct_path_grid(self, came_from: dict, goal_row: int, goal_col: int):
+        """Reconstruct path as grid coordinates."""
+        path = []
+        current = (goal_row, goal_col)
+        while current in came_from:
+            path.append(current)
+            current = came_from[current]
+        path.append(current)
+        path.reverse()
+        return path  # list[(row,col)]
+
+    def _compress_collinear(self, path_grid):
+        """Merge consecutive steps with the same 8-dir delta."""
+        if len(path_grid) <= 2:
+            return path_grid[:]
+        out = [path_grid[0]]
+        prev = path_grid[0]
+        dprev = None
+        for cur in path_grid[1:]:
+            dr = cur[0] - prev[0]
+            dc = cur[1] - prev[1]
+            # normalize to {-1,0,1}
+            dr = 0 if dr == 0 else (1 if dr > 0 else -1)
+            dc = 0 if dc == 0 else (1 if dc > 0 else -1)
+            d = (dr, dc)
+            if d != dprev:
+                out.append(cur)  # start new run
+                dprev = d
+            else:
+                out[-1] = cur     # extend current run's end
+            prev = cur
+        return out
+
+    def _string_pull(self, path_grid, use_eroded=True):
+        """Greedy line-of-sight smoothing ("rubber band")."""
+        if len(path_grid) <= 2:
+            return path_grid[:]
+        smoothed = [path_grid[0]]
+        anchor_idx = 0
+        while True:
+            # extend as far as we can from the anchor
+            far = anchor_idx + 1
+            last_good = far
+            while far < len(path_grid):
+                a = path_grid[anchor_idx]
+                b = path_grid[far]
+                if self._line_of_sight_free(a[0], a[1], b[0], b[1], use_eroded=use_eroded):
+                    last_good = far
+                    far += 1
+                else:
+                    break
+            smoothed.append(path_grid[last_good])
+            if last_good == len(path_grid) - 1:
+                break
+            anchor_idx = last_good
+        return smoothed
+
+    def _grid_to_world_path(self, path_grid):
+        """Convert grid path to world coordinates."""
+        return [self.grid_to_world(r, c) for (r, c) in path_grid]
+    
     def plan_path(self, start_x: float, start_z: float, goal_x: float, goal_z: float, 
-                  use_eroded: bool = True) -> Optional[List[Tuple[float, float]]]:
+                  use_eroded: bool = True, simplify: str = "string_pull") -> Optional[List[Tuple[float, float]]]:
         # convert to grid coordinates
         start_row, start_col = self.world_to_grid(start_x, start_z)
         goal_row, goal_col = self.world_to_grid(goal_x, goal_z)
@@ -110,7 +198,19 @@ class AStarPlanner:
             # check if we reached the goal
             if current_row == goal_row and current_col == goal_col:
                 print(f"Path found! Visited {len(visited)} nodes")
-                return self._reconstruct_path(came_from, current_row, current_col)
+                grid_path = self._reconstruct_path_grid(came_from, current_row, current_col)
+
+                # Apply path simplification
+                if simplify in ("rle", "collinear", "dir"):
+                    grid_path = self._compress_collinear(grid_path)
+                elif simplify in ("string_pull", "los", "smooth", "both"):
+                    grid_path = self._compress_collinear(grid_path)
+                    grid_path = self._string_pull(grid_path, use_eroded=use_eroded)
+                # else: simplify == "none" or other - use original grid_path
+
+                world_path = self._grid_to_world_path(grid_path)
+                print(f"Path length: {len(world_path)} waypoints (after simplify='{simplify}')")
+                return world_path
             
             # explore neighbors
             for neighbor_row, neighbor_col, move_cost in self.get_neighbors(current_row, current_col):
@@ -172,14 +272,19 @@ def test_planner():
         start_x, start_z = 0.0, 0.0
         goal_x, goal_z = 2.0, 2.0
         
-        path = planner.plan_path(start_x, start_z, goal_x, goal_z)
-        
-        if path:
-            print("\nPath found:")
-            for i, (x, z) in enumerate(path):
-                print(f"  {i}: ({x:.2f}, {z:.2f})")
-        else:
-            print("No path found")
+        # Test different simplification methods
+        for method in ["none", "collinear", "string_pull"]:
+            print(f"\n--- Testing simplify='{method}' ---")
+            path = planner.plan_path(start_x, start_z, goal_x, goal_z, simplify=method)
+            
+            if path:
+                print(f"Path found with {len(path)} waypoints:")
+                for i, (x, z) in enumerate(path[:10]):  # Show first 10 waypoints
+                    print(f"  {i}: ({x:.2f}, {z:.2f})")
+                if len(path) > 10:
+                    print(f"  ... and {len(path) - 10} more waypoints")
+            else:
+                print("No path found")
             
     except Exception as e:
         print(f"Error testing planner: {e}")

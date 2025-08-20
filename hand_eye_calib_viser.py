@@ -587,7 +587,7 @@ def add_camera_position_dot(server, transformation_matrix):
         return None
 
 
-def process_clicked_point(clicked_point, transformation_matrix, astar_planner=None, server=None):
+def process_clicked_point(clicked_point, transformation_matrix, astar_planner=None, server=None, status_display=None):
     # get current camera position
     current_camera_position, current_quaternion, _ = read_camera_position()
     
@@ -659,18 +659,62 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
         
         # A* path planning
         path_waypoints = None
+        status_message = "Unknown status"
+        
         if astar_planner is not None:
             try:
                 print("A* path planning:")
                 start_x, start_z = transformed_current[0], transformed_current[2]
                 goal_x, goal_z = destination_point[0], destination_point[2]
                 
-                path_waypoints = astar_planner.plan_path(start_x, start_z, goal_x, goal_z, use_eroded=True)
+                # check if destination is in a free cell
+                goal_row, goal_col = astar_planner.world_to_grid(goal_x, goal_z)
+                start_row, start_col = astar_planner.world_to_grid(start_x, start_z)
+                
+                print(f"Start grid position: ({start_row}, {start_col})")
+                print(f"Goal grid position: ({goal_row}, {goal_col})")
+                
+                # check if goal is valid and free
+                if not astar_planner.is_valid(goal_row, goal_col):
+                    status_message = "LOCATION OUT OF BOUNDS - Click within the mapped area"
+                    print("Goal position is outside the mapped area!")
+                    if status_display:
+                        status_display.value = status_message
+                    return None
+                elif not astar_planner.is_free(goal_row, goal_col, use_eroded=True):
+                    # check what type of obstacle
+                    planning_val = astar_planner.planning_map[goal_row, goal_col]
+                    eroded_val = astar_planner.eroded_map[goal_row, goal_col]
+                    
+                    if planning_val == 1:
+                        status_message = "LOCATION OBSTRUCTED - Obstacle detected at destination"
+                    elif eroded_val == 1:
+                        status_message = "LOCATION OBSTRUCTED - Too close to obstacles"
+                    else:
+                        status_message = "LOCATION OBSTRUCTED - Unknown obstacle type"
+                    
+                    print(f"Goal position is not free! Planning: {planning_val}, Eroded: {eroded_val}")
+                    if status_display:
+                        status_display.value = status_message
+                    return None
+                elif not astar_planner.is_free(start_row, start_col, use_eroded=True):
+                    status_message = "CURRENT POSITION OBSTRUCTED - Robot is in an obstacle area"
+                    print("Current position is not free!")
+                    if status_display:
+                        status_display.value = status_message
+                    return None
+                
+                # destination is free, try A* planning
+                path_waypoints = astar_planner.plan_path(start_x, start_z, goal_x, goal_z, use_eroded=True, simplify="string_pull")
                 
                 if path_waypoints:
+                    status_message = f"PATH AVAILABLE - {len(path_waypoints)} waypoints found"
                     print(f"A* path found with {len(path_waypoints)} waypoints:")
                     for i, (x, z) in enumerate(path_waypoints):
                         print(f"  Waypoint {i}: ({x:.2f}, {z:.2f})")
+                    
+                    if status_display:
+                        status_display.value = status_message
                     
                     # visualize path in viser
                     if server is not None:
@@ -680,7 +724,7 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                     if len(path_waypoints) > 1:
                         print("Sending A* waypoint sequence to TidyBot...")
                         if send_astar_waypoint_sequence(path_waypoints, transformed_current, baseline_yaw):
-                            # waypoint sequence sent successfully, skip direct movement
+                            # waypoint sequence sent successfully
                             save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
                             print("A* waypoint sequence initiated!")
                             
@@ -690,43 +734,54 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                                 'waypoint_count': len(path_waypoints)
                             }
                         else:
-                            print("Failed to send A* waypoint sequence - falling back to direct movement")
+                            print("Failed to send A* waypoint sequence")
+                            return None
                     else:
-                        print("A* path has only start point - using direct movement")
+                        # single waypoint - send direct TidyBot command
+                        print("A* path has only start point - sending direct TidyBot command")
+                        
+                        # TidyBot commands
+                        tidybot_x = global_x
+                        tidybot_y = global_z 
+                        tidybot_theta = 0.0  # degrees
+                        
+                        print(f"  TidyBot X movement (global): {tidybot_x:.3f}m")
+                        print(f"  TidyBot Y movement (global): {tidybot_y:.3f}m")
+                        print(f"  TidyBot rotation (theta): {tidybot_theta:.1f} degrees")
+                        print(f"  TidyBot command: [{tidybot_y:.3f}, {tidybot_x:.3f}, {tidybot_theta:.1f}]")
+                        
+                        # send command to send_cmd.py
+                        tidybot_command = [tidybot_y, tidybot_x, tidybot_theta]
+                        if send_tidybot_command(tidybot_command):
+                            print("TidyBot command sent successfully!")
+                            save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
+                            return {
+                                'status': 'direct_movement_sent',
+                                'movement_result': movement_result,
+                                'tidybot_command': tidybot_command
+                            }
+                        else:
+                            print("Failed to send TidyBot command")
+                            return None
                 else:
-                    print("A* planning failed - using direct movement")
+                    status_message = "LOCATION UNREACHABLE - No path found by A* planner"
+                    print("A* planning failed")
+                    if status_display:
+                        status_display.value = status_message
                     
             except Exception as e:
+                status_message = f"PLANNING ERROR - {str(e)}"
                 print(f"A* planning error: {e}")
-                print("Falling back to direct movement")
+                if status_display:
+                    status_display.value = status_message
         else:
-            print("A* planner not available - using direct movement")
+            status_message = "A* PLANNER NOT AVAILABLE"
+            print("A* planner not available")
+            if status_display:
+                status_display.value = status_message
         
-        # TidyBot commands
-        tidybot_x = global_x
-        tidybot_y = global_z 
-        tidybot_theta = 0.0  # degrees
-        
-        print(f"  TidyBot X movement (global): {tidybot_x:.3f}m")
-        print(f"  TidyBot Y movement (global): {tidybot_y:.3f}m")
-        print(f"  TidyBot rotation (theta): {tidybot_theta:.1f} degrees")
-        print(f"  TidyBot command: [{tidybot_y:.3f}, {tidybot_x:.3f}, {tidybot_theta:.1f}]")
-        
-        # send command to send_cmd.py
-        tidybot_command = [tidybot_y, tidybot_x, tidybot_theta]
-        if send_tidybot_command(tidybot_command):
-            print("TidyBot command sent successfully!")
-        else:
-            print("Failed to send TidyBot command")
-        
-        # save result
-        save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
-        print("Movement calculated and saved!")
-        
-        return {
-            'status': 'movement_calculated',
-            'movement_result': movement_result
-        }
+        # if we reach here, A* planning was not successful
+        return None
     else:
         print("Failed to calculate movement")
         return None
@@ -1286,26 +1341,99 @@ if __name__ == "__main__":
         visible=True
     )
     
+    # create obstacle grid visualization
+    def create_obstacle_grid_points(planner, height_y=0.0):
+        if planner is None:
+            return np.array([]), np.array([])
+            
+        points = []
+        colors = []
+        
+        # create points for each cell
+        for row in range(planner.height):
+            for col in range(planner.width):
+                # get world coordinates of cell center
+                x, z = planner.grid_to_world(row, col)
+                
+                # determine color based on cell type
+                planning_val = planner.planning_map[row, col]
+                eroded_val = planner.eroded_map[row, col]
+                
+                if planning_val == 0:  # free
+                    if eroded_val == 0:  # free after erosion
+                        color = [0.0, 1.0, 0.0]
+                    else:  # obstacle after erosion
+                        color = [1.0, 1.0, 0.0]
+                elif planning_val == 1:  # obstacle
+                    color = [1.0, 0.0, 0.0]
+                else:  # unknown
+                    color = [0.5, 0.5, 0.5]
+                
+                # add point at specified height
+                points.append([x, height_y, z])
+                colors.append(color)
+        
+        return np.array(points), np.array(colors)
+    
+    def update_obstacle_grid():
+        if show_obstacle_grid.value and astar_planner is not None:
+            # create grid points
+            grid_points, grid_colors = create_obstacle_grid_points(astar_planner, grid_height.value)
+            
+            if len(grid_points) > 0:
+                # add or update obstacle grid
+                server.scene.add_point_cloud(
+                    "/obstacle_grid",
+                    points=grid_points,
+                    colors=grid_colors,
+                    point_size=0.01,
+                )
+            else:
+                # remove grid if no points
+                try:
+                    server.scene["/obstacle_grid"].remove()
+                except:
+                    pass
+        else:
+            # remove grid when disabled
+            try:
+                server.scene["/obstacle_grid"].remove()
+            except:
+                pass
+
     # create GUI elements first
     with server.gui.add_folder("Coordinate Display"):
-        server.gui.add_markdown(
-            "**Click on points in the transformed point cloud to display their coordinates.**\n\n"
-            "A yellow marker will appear at the clicked point for 3 seconds."
-        )
-        
         # add a text display for the last clicked coordinate
         coord_display = server.gui.add_text(
             "Last clicked coordinate",
             initial_value="No point clicked yet",
-            disabled=True
+            disabled=False
+        )
+        
+        # add a status display for path planning
+        path_status_display = server.gui.add_text(
+            "Path Planning Status",
+            initial_value="Click a point to begin",
+            disabled=False
+        )
+    
+    # add obstacle grid visualization controls
+    with server.gui.add_folder("Obstacle Grid Visualization"):
+        show_obstacle_grid = server.gui.add_checkbox(
+            "Show Obstacle Grid",
+            initial_value=False
+        )
+        
+        grid_height = server.gui.add_slider(
+            "Grid Height (Y)",
+            min=-2.0,
+            max=2.0,
+            step=0.01,
+            initial_value=0.0
         )
     
     # add transformation adjustment sliders
-    with server.gui.add_folder("Transformation Adjustment"):
-        server.gui.add_markdown(
-            "**Adjust transformation parameters in real-time**\n\n"
-            "These sliders modify the hand-eye calibration transformation."
-        )
+    with server.gui.add_folder("Alignment Adjustment"):
         
         y_rotation_slider = server.gui.add_slider(
             "Y Rotation (degrees)",
@@ -1404,6 +1532,15 @@ if __name__ == "__main__":
     def _(_):
         update_transformation()
     
+    # obstacle grid callbacks
+    @show_obstacle_grid.on_update
+    def _(_):
+        update_obstacle_grid()
+        
+    @grid_height.on_update
+    def _(_):
+        update_obstacle_grid()
+    
     # reset button callback
     @reset_button.on_click
     def _(_):
@@ -1434,6 +1571,9 @@ if __name__ == "__main__":
     
     # keep track of active marker handles
     active_marker_handles = {}
+    
+    # initial obstacle grid update
+    update_obstacle_grid()
     
     # state management for sequential movements
     robot_moving = False
@@ -1512,7 +1652,7 @@ if __name__ == "__main__":
                     coord_display.value = coord_str
                     
                     # Process clicked point for movement calculation
-                    process_clicked_point(closest_point, transformation_matrix, astar_planner, server)
+                    process_clicked_point(closest_point, transformation_matrix, astar_planner, server, path_status_display)
                     
                     # add a temporary marker at the clicked point
                     marker_name = f"/clicked_point_{time.time()}"
