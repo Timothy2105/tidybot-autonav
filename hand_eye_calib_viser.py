@@ -211,7 +211,7 @@ def generate_planning_maps():
                 self.zlim = None
                 self.height_axis = 1
                 self.visualize = False
-                self.erode = 5
+                self.erode = 3
                 self.dilate = 2
                 self.use_open3d = False
         
@@ -1355,16 +1355,12 @@ if __name__ == "__main__":
                 # get world coordinates of cell center
                 x, z = planner.grid_to_world(row, col)
                 
-                # determine color based on cell type
-                planning_val = planner.planning_map[row, col]
-                eroded_val = planner.eroded_map[row, col]
+                # use processed map
+                processed_val = planner.eroded_map[row, col]
                 
-                if planning_val == 0:  # free
-                    if eroded_val == 0:  # free after erosion
-                        color = [0.0, 1.0, 0.0]
-                    else:  # obstacle after erosion
-                        color = [1.0, 1.0, 0.0]
-                elif planning_val == 1:  # obstacle
+                if processed_val == 0:  # free
+                    color = [0.0, 1.0, 0.0]
+                elif processed_val == 1:  # obstacle
                     color = [1.0, 0.0, 0.0]
                 else:  # unknown
                     color = [0.5, 0.5, 0.5]
