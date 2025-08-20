@@ -1425,7 +1425,7 @@ if __name__ == "__main__":
             min=-2.0,
             max=2.0,
             step=0.01,
-            initial_value=0.0
+            initial_value=0.5
         )
     
     # add transformation adjustment sliders
@@ -1596,7 +1596,7 @@ if __name__ == "__main__":
     
     # add click handler to the invisible sphere
     @click_catcher.on_click
-    def handle_click(event: viser.SceneNodePointerEvent) -> None:
+    def handle_click(event):
         global robot_moving, last_command_time
         
         # check if robot is currently moving

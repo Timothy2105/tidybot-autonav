@@ -1,15 +1,14 @@
 import numpy as np
 import json
 import heapq
-from typing import List, Tuple, Optional
 import os
 
 
 class AStarPlanner:    
-    def __init__(self, map_data_path: str = "calib-results/planning_maps.json"):
+    def __init__(self, map_data_path="calib-results/planning_maps.json"):
         self.load_maps(map_data_path)
         
-    def load_maps(self, map_data_path: str):
+    def load_maps(self, map_data_path):
         if not os.path.exists(map_data_path):
             raise FileNotFoundError(f"Planning maps not found: {map_data_path}")
             
@@ -31,30 +30,47 @@ class AStarPlanner:
         
         print(f"Loaded planning maps: {self.height}x{self.width} grid, {self.cell_size}m cells")
         
-    def world_to_grid(self, x: float, z: float) -> Tuple[int, int]:
+    def world_to_grid(self, x, z):
         col = int((x - self.x_min) / self.cell_size)
         row = int((z - self.z_min) / self.cell_size)
         return row, col
     
-    def grid_to_world(self, row: int, col: int) -> Tuple[float, float]:
+    def grid_to_world(self, row, col):
         x = self.x_min + col * self.cell_size + self.cell_size / 2
         z = self.z_min + row * self.cell_size + self.cell_size / 2
         return x, z
     
-    def is_valid(self, row: int, col: int) -> bool:
+    def is_valid(self, row, col):
         return 0 <= row < self.height and 0 <= col < self.width
     
-    def is_free(self, row: int, col: int, use_eroded: bool = True) -> bool:
+    def is_free(self, row, col, use_eroded=True):
         if not self.is_valid(row, col):
             return False
         
         map_to_use = self.eroded_map if use_eroded else self.planning_map
         return map_to_use[row, col] == 0  # 0 = free
     
-    def get_neighbors(self, row: int, col: int) -> List[Tuple[int, int, float]]:
+    # check if enough clearance for robot movement
+    def has_clearance(self, row, col, clearance_radius=2, use_eroded=True):
+        map_to_use = self.eroded_map if use_eroded else self.planning_map
+        
+        # check all cells in 5x5 clearance area
+        for dr in range(-clearance_radius, clearance_radius + 1):
+            for dc in range(-clearance_radius, clearance_radius + 1):
+                check_row = row + dr
+                check_col = col + dc
+                
+                if not self.is_valid(check_row, check_col):
+                    return False
+                if map_to_use[check_row, check_col] != 0:
+                    return False
+        
+        return True
+    
+    def get_neighbors(self, row, col, use_clearance=True):
         neighbors = []
         
-        # 8-connected grid (including diagonals)
+        # 8-connected grid
         directions = [
             (-1, -1, 1.414), (-1, 0, 1.0), (-1, 1, 1.414),
             (0, -1, 1.0),                   (0, 1, 1.0),
@@ -63,16 +79,22 @@ class AStarPlanner:
         
         for dr, dc, cost in directions:
             new_row, new_col = row + dr, col + dc
-            if self.is_free(new_row, new_col):
-                neighbors.append((new_row, new_col, cost))
+            
+            # check if position has 5x5 clearance
+            if use_clearance:
+                if self.has_clearance(new_row, new_col, clearance_radius=2):
+                    neighbors.append((new_row, new_col, cost))
+            else:
+                if self.is_free(new_row, new_col):
+                    neighbors.append((new_row, new_col, cost))
         
         return neighbors
     
-    def heuristic(self, row1: int, col1: int, row2: int, col2: int) -> float:
+    def heuristic(self, row1, col1, row2, col2):
         return np.sqrt((row1 - row2)**2 + (col1 - col2)**2)
     
-    def _bresenham_line_cells(self, r0: int, c0: int, r1: int, c1: int):
-        """Yield grid cells on a line from (r0,c0) to (r1,c1), inclusive."""
+    # Bresenham's line algorithm
+    def _bresenham_line_cells(self, r0, c0, r1, c1):
         dr = abs(r1 - r0); dc = abs(c1 - c0)
         sr = 1 if r0 < r1 else -1
         sc = 1 if c0 < c1 else -1
@@ -90,16 +112,14 @@ class AStarPlanner:
                 err += dr
                 c += sc
 
-    def _line_of_sight_free(self, r0: int, c0: int, r1: int, c1: int, use_eroded: bool = True) -> bool:
-        """True if every cell along the line is free."""
-        grid = self.eroded_map if use_eroded else self.planning_map
+    # to simplify path movements
+    def _line_of_sight_free(self, r0, c0, r1, c1, use_eroded=True):
         for rr, cc in self._bresenham_line_cells(r0, c0, r1, c1):
-            if not self.is_valid(rr, cc) or grid[rr, cc] != 0:
+            if not self.has_clearance(rr, cc, clearance_radius=2, use_eroded=use_eroded):
                 return False
         return True
 
-    def _reconstruct_path_grid(self, came_from: dict, goal_row: int, goal_col: int):
-        """Reconstruct path as grid coordinates."""
+    def _reconstruct_path_grid(self, came_from, goal_row, goal_col):
         path = []
         current = (goal_row, goal_col)
         while current in came_from:
@@ -107,10 +127,10 @@ class AStarPlanner:
             current = came_from[current]
         path.append(current)
         path.reverse()
-        return path  # list[(row,col)]
+        return path
 
+    # merge consecutive steps
     def _compress_collinear(self, path_grid):
-        """Merge consecutive steps with the same 8-dir delta."""
         if len(path_grid) <= 2:
             return path_grid[:]
         out = [path_grid[0]]
@@ -131,14 +151,13 @@ class AStarPlanner:
             prev = cur
         return out
 
+    # greedy line of sight smoothing
     def _string_pull(self, path_grid, use_eroded=True):
-        """Greedy line-of-sight smoothing ("rubber band")."""
         if len(path_grid) <= 2:
             return path_grid[:]
         smoothed = [path_grid[0]]
         anchor_idx = 0
         while True:
-            # extend as far as we can from the anchor
             far = anchor_idx + 1
             last_good = far
             while far < len(path_grid):
@@ -156,11 +175,9 @@ class AStarPlanner:
         return smoothed
 
     def _grid_to_world_path(self, path_grid):
-        """Convert grid path to world coordinates."""
         return [self.grid_to_world(r, c) for (r, c) in path_grid]
     
-    def plan_path(self, start_x: float, start_z: float, goal_x: float, goal_z: float, 
-                  use_eroded: bool = True, simplify: str = "string_pull") -> Optional[List[Tuple[float, float]]]:
+    def plan_path(self, start_x, start_z, goal_x, goal_z, use_eroded=True, simplify="string_pull"):
         # convert to grid coordinates
         start_row, start_col = self.world_to_grid(start_x, start_z)
         goal_row, goal_col = self.world_to_grid(goal_x, goal_z)
@@ -168,13 +185,13 @@ class AStarPlanner:
         print(f"Planning path from ({start_x:.2f}, {start_z:.2f}) to ({goal_x:.2f}, {goal_z:.2f})")
         print(f"Grid coordinates: ({start_row}, {start_col}) to ({goal_row}, {goal_col})")
         
-        # check if start and goal are valid
-        if not self.is_free(start_row, start_col, use_eroded):
-            print(f"Start position ({start_row}, {start_col}) is not free!")
+        # check if start and goal are valid with 5x5 clearance
+        if not self.has_clearance(start_row, start_col, clearance_radius=2, use_eroded=use_eroded):
+            print(f"Start position ({start_row}, {start_col}) does not have sufficient clearance (5x5 area)!")
             return None
             
-        if not self.is_free(goal_row, goal_col, use_eroded):
-            print(f"Goal position ({goal_row}, {goal_col}) is not free!")
+        if not self.has_clearance(goal_row, goal_col, clearance_radius=2, use_eroded=use_eroded):
+            print(f"Goal position ({goal_row}, {goal_col}) does not have sufficient clearance (5x5 area)!")
             return None
         
         # A* algorithm
@@ -195,18 +212,17 @@ class AStarPlanner:
                 
             visited.add((current_row, current_col))
             
-            # check if we reached the goal
+            # reached goal?
             if current_row == goal_row and current_col == goal_col:
                 print(f"Path found! Visited {len(visited)} nodes")
                 grid_path = self._reconstruct_path_grid(came_from, current_row, current_col)
 
-                # Apply path simplification
+                # path simplification
                 if simplify in ("rle", "collinear", "dir"):
                     grid_path = self._compress_collinear(grid_path)
                 elif simplify in ("string_pull", "los", "smooth", "both"):
                     grid_path = self._compress_collinear(grid_path)
                     grid_path = self._string_pull(grid_path, use_eroded=use_eroded)
-                # else: simplify == "none" or other - use original grid_path
 
                 world_path = self._grid_to_world_path(grid_path)
                 print(f"Path length: {len(world_path)} waypoints (after simplify='{simplify}')")
@@ -229,7 +245,7 @@ class AStarPlanner:
         print("No path found!")
         return None
     
-    def _reconstruct_path(self, came_from: dict, goal_row: int, goal_col: int) -> List[Tuple[float, float]]:
+    def _reconstruct_path(self, came_from, goal_row, goal_col):
         path_grid = []
         current = (goal_row, goal_col)
         
@@ -249,7 +265,7 @@ class AStarPlanner:
         print(f"Path length: {len(path_world)} waypoints")
         return path_world
     
-    def get_map_info(self) -> dict:
+    def get_map_info(self):
         return {
             'grid_size': (self.height, self.width),
             'cell_size': self.cell_size,
@@ -272,14 +288,14 @@ def test_planner():
         start_x, start_z = 0.0, 0.0
         goal_x, goal_z = 2.0, 2.0
         
-        # Test different simplification methods
+        # test different simplification methods
         for method in ["none", "collinear", "string_pull"]:
             print(f"\n--- Testing simplify='{method}' ---")
             path = planner.plan_path(start_x, start_z, goal_x, goal_z, simplify=method)
             
             if path:
                 print(f"Path found with {len(path)} waypoints:")
-                for i, (x, z) in enumerate(path[:10]):  # Show first 10 waypoints
+                for i, (x, z) in enumerate(path[:10]):  # first 10 waypoints
                     print(f"  {i}: ({x:.2f}, {z:.2f})")
                 if len(path) > 10:
                     print(f"  ... and {len(path) - 10} more waypoints")
