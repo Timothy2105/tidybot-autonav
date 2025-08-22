@@ -67,7 +67,7 @@ class AStarPlanner:
         
         return True
     
-    def get_neighbors(self, row, col, use_clearance=True):
+    def get_neighbors(self, row, col, use_clearance=True, use_eroded=True):
         neighbors = []
         
         # 8-connected grid
@@ -82,10 +82,10 @@ class AStarPlanner:
             
             # check if position has 5x5 clearance
             if use_clearance:
-                if self.has_clearance(new_row, new_col, clearance_radius=2):
+                if self.has_clearance(new_row, new_col, clearance_radius=2, use_eroded=use_eroded):
                     neighbors.append((new_row, new_col, cost))
             else:
-                if self.is_free(new_row, new_col):
+                if self.is_free(new_row, new_col, use_eroded=use_eroded):
                     neighbors.append((new_row, new_col, cost))
         
         return neighbors
@@ -177,7 +177,43 @@ class AStarPlanner:
     def _grid_to_world_path(self, path_grid):
         return [self.grid_to_world(r, c) for (r, c) in path_grid]
     
-    def plan_path(self, start_x, start_z, goal_x, goal_z, use_eroded=True, simplify="string_pull"):
+    def find_nearest_clear_cell(self, start_row, start_col, max_radius=50, use_eroded=True):
+        from collections import deque
+        grid = self.eroded_map if use_eroded else self.planning_map
+        if not self.is_valid(start_row, start_col):
+            return None
+
+        q = deque()
+        q.append((start_row, start_col))
+        seen = set([(start_row, start_col)])
+
+        # 8-connected
+        dirs = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+        while q:
+            r, c = q.popleft()
+
+            # stop if cell has full clearance
+            if self.has_clearance(r, c, clearance_radius=2, use_eroded=use_eroded):
+                return (r, c)
+
+            # radius guard
+            if abs(r - start_row) + abs(c - start_col) > max_radius:
+                continue
+
+            # expand over free cells only
+            for dr, dc in dirs:
+                rr, cc = r + dr, c + dc
+                if (rr, cc) in seen:
+                    continue
+                if not self.is_valid(rr, cc):
+                    continue
+                if grid[rr, cc] != 0:
+                    continue
+                seen.add((rr, cc))
+                q.append((rr, cc))
+        return None
+    
+    def plan_path(self, start_x, start_z, goal_x, goal_z, use_eroded=True, simplify="string_pull", skip_start_clearance=False, use_clearance=True, require_goal_clearance=True):
         # convert to grid coordinates
         start_row, start_col = self.world_to_grid(start_x, start_z)
         goal_row, goal_col = self.world_to_grid(goal_x, goal_z)
@@ -185,14 +221,23 @@ class AStarPlanner:
         print(f"Planning path from ({start_x:.2f}, {start_z:.2f}) to ({goal_x:.2f}, {goal_z:.2f})")
         print(f"Grid coordinates: ({start_row}, {start_col}) to ({goal_row}, {goal_col})")
         
-        # check if start and goal are valid with 5x5 clearance
-        if not self.has_clearance(start_row, start_col, clearance_radius=2, use_eroded=use_eroded):
-            print(f"Start position ({start_row}, {start_col}) does not have sufficient clearance (5x5 area)!")
-            return None
+        # start clearance
+        if not skip_start_clearance and use_clearance:
+            if not self.has_clearance(start_row, start_col, clearance_radius=2, use_eroded=use_eroded):
+                print(f"Start position ({start_row}, {start_col}) lacks clearance")
+                return None
+        else:
+            print("Skipping start clearance check or using no-clearance policy for neighbors")
             
-        if not self.has_clearance(goal_row, goal_col, clearance_radius=2, use_eroded=use_eroded):
-            print(f"Goal position ({goal_row}, {goal_col}) does not have sufficient clearance (5x5 area)!")
-            return None
+        # goal clearance
+        if require_goal_clearance and use_clearance:
+            if not self.has_clearance(goal_row, goal_col, clearance_radius=2, use_eroded=use_eroded):
+                print(f"Goal position ({goal_row}, {goal_col}) lacks clearance")
+                return None
+        else:
+            if not self.is_free(goal_row, goal_col, use_eroded=use_eroded):
+                print(f"Goal cell is not free")
+                return None
         
         # A* algorithm
         open_set = []
@@ -229,7 +274,7 @@ class AStarPlanner:
                 return world_path
             
             # explore neighbors
-            for neighbor_row, neighbor_col, move_cost in self.get_neighbors(current_row, current_col):
+            for neighbor_row, neighbor_col, move_cost in self.get_neighbors(current_row, current_col, use_clearance=use_clearance, use_eroded=use_eroded):
                 if (neighbor_row, neighbor_col) in visited:
                     continue
                 
@@ -244,6 +289,61 @@ class AStarPlanner:
         
         print("No path found!")
         return None
+    
+    def plan_safe_path(self, start_x, start_z, goal_x, goal_z, use_eroded=True, simplify="string_pull"):
+        sr, sc = self.world_to_grid(start_x, start_z)
+        gr, gc = self.world_to_grid(goal_x, goal_z)
+
+        start_clear = self.has_clearance(sr, sc, clearance_radius=2, use_eroded=use_eroded)
+        goal_clear  = self.has_clearance(gr, gc, clearance_radius=2, use_eroded=use_eroded)
+
+        if not goal_clear:
+            # don't drive into tight/blocked goal
+            print("Goal lacks clearance; refusing to plan.")
+            return None
+
+        if start_clear:
+            # single-stage
+            return self.plan_path(start_x, start_z, goal_x, goal_z,
+                                  use_eroded=use_eroded, simplify=simplify,
+                                  skip_start_clearance=False, use_clearance=True, require_goal_clearance=True)
+
+        # two-stage
+        print("Start is obstructed: searching for nearest clear cell...")
+        best = self.find_nearest_clear_cell(sr, sc, max_radius=80, use_eroded=use_eroded)
+        if best is None:
+            print("No clear cell found near the start")
+            return None
+        clear_x, clear_z = self.grid_to_world(*best)
+        print(f"Nearest clear cell: grid {best} -> world ({clear_x:.2f}, {clear_z:.2f})")
+
+        # obstructed -> clear
+        leg1 = self.plan_path(start_x, start_z, clear_x, clear_z,
+                              use_eroded=use_eroded, simplify="collinear",
+                              skip_start_clearance=True, use_clearance=False, require_goal_clearance=True)
+        if not leg1 or len(leg1) < 2:
+            print("Failed to reach the clear cell from obstructed start")
+            return None
+
+        # clear -> goal
+        leg2 = self.plan_path(clear_x, clear_z, goal_x, goal_z,
+                              use_eroded=use_eroded, simplify="string_pull",
+                              skip_start_clearance=False, use_clearance=True, require_goal_clearance=True)
+        if not leg2 or len(leg2) < 2:
+            print("Failed to plan from clear cell to goal")
+            return None
+
+        # merge legs
+        merged = leg1 + leg2[1:]
+
+        # final smoothing over eroded map
+        grid = [self.world_to_grid(x, z) for (x, z) in merged]
+        grid = self._compress_collinear(grid)
+        grid = self._string_pull(grid, use_eroded=use_eroded)
+        merged_smoothed = self._grid_to_world_path(grid)
+
+        print(f"Two-stage path: {len(merged_smoothed)} waypoints after smoothing")
+        return merged_smoothed
     
     def _reconstruct_path(self, came_from, goal_row, goal_col):
         path_grid = []

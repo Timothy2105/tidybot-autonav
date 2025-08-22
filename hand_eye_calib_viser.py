@@ -387,62 +387,173 @@ def wait_for_robot_completion(timeout=30.0):
     return False
 
 
-# send in sequence
-def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw):
+# send with dynamic re-planning after each waypoint
+def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw, server):
+    global astar_planner, transformation_matrix
+    
     if not path_waypoints or len(path_waypoints) < 2:
         print("No valid A* path to execute")
         return False
     
-    waypoint_commands = []
-    yaw_rad = np.radians(baseline_yaw)
+    # store the final destination
+    final_destination = path_waypoints[-1]
+    print(f"Starting dynamic A* navigation to final destination: ({final_destination[0]:.2f}, {final_destination[1]:.2f})")
     
-    # convert each waypoint to TidyBot command
-    for i in range(1, len(path_waypoints)):  # skip first waypoint
-        prev_x, prev_z = path_waypoints[i-1]
-        curr_x, curr_z = path_waypoints[i]
-        
-        # calculate movement in world coordinates
-        world_x_movement = curr_x - prev_x
-        world_z_movement = curr_z - prev_z
-        
-        # apply baseline yaw transformation
-        global_x =  world_x_movement * np.cos(-yaw_rad) + world_z_movement * np.sin(-yaw_rad)
-        global_z = -world_x_movement * np.sin(-yaw_rad) + world_z_movement * np.cos(-yaw_rad)
-        
-        # tidybot command format: [y, x, theta]
-        tidybot_command = [global_z, global_x, 0.0]
-        waypoint_commands.append({
-            'waypoint': i,
-            'world_pos': (curr_x, curr_z),
-            'movement': (global_x, global_z),
-            'command': tidybot_command
-        })
+    waypoint_count = 0
+    max_waypoints = 20
     
-    print(f"Generated {len(waypoint_commands)} waypoint commands:")
-    for i, cmd_data in enumerate(waypoint_commands):
-        print(f"  Step {i+1}: Move to ({cmd_data['world_pos'][0]:.2f}, {cmd_data['world_pos'][1]:.2f})")
-        print(f"           Command: [{cmd_data['command'][0]:.3f}, {cmd_data['command'][1]:.3f}, {cmd_data['command'][2]:.1f}]")
-    
-    # send waypoints sequentially, waiting for each to complete
-    for i, cmd_data in enumerate(waypoint_commands):
-        print(f"\nSending waypoint {i+1}/{len(waypoint_commands)}:")
-        print(f"  Target: ({cmd_data['world_pos'][0]:.2f}, {cmd_data['world_pos'][1]:.2f})")
-        print(f"  Command: {cmd_data['command']}")
-        
-        # send command
-        if send_tidybot_command(cmd_data['command']):
-            print(f"  Sent waypoint {i+1} successfully")
-            
-            # wait for completion
-            if wait_for_robot_completion():
-                print(f"  Waypoint {i+1} completed!")
+    while waypoint_count < max_waypoints:
+        # get current camera position and transform
+        try:
+            current_camera_position, current_quaternion, _ = read_camera_position()
+            if transformation_matrix is not None:
+                current_homogeneous = np.append(current_camera_position, 1)
+                transformed_current = transformation_matrix @ current_homogeneous
+                current_world_pos = (transformed_current[0], transformed_current[2])
             else:
-                print(f"  Warning: Waypoint {i+1} may not have completed properly")
-        else:
-            print(f"  Failed to send waypoint {i+1}")
+                current_world_pos = (current_camera_position[0], current_camera_position[2])
+            
+            print(f"\nStep {waypoint_count + 1}: Current position: ({current_world_pos[0]:.2f}, {current_world_pos[1]:.2f})")
+            
+            distance_to_goal = np.sqrt((final_destination[0] - current_world_pos[0])**2 + 
+                                     (final_destination[1] - current_world_pos[1])**2)
+            
+            if distance_to_goal < 0.2:  # within 20cm of destination
+                print(f"Reached destination! Distance to goal: {distance_to_goal:.3f}m")
+                break
+            
+            # recalculate safe path from current position to destination
+            print(f"Recalculating safe path from current position to destination...")
+            current_path = astar_planner.plan_safe_path(
+                current_world_pos[0], current_world_pos[1],
+                final_destination[0], final_destination[1],
+                use_eroded=True, simplify="string_pull"
+            )
+            
+            if not current_path or len(current_path) < 2:
+                print("Failed to find safe path from current position to destination!")
+                return False
+            
+            print(f"Found safe path with {len(current_path)} waypoints")
+            next_waypoint = current_path[1]  # take next step
+            
+            # update visualization with current path
+            try:
+                visualize_astar_path(server, current_path)
+                print(f"Updated visualization: safe path (two-stage if needed)")
+            except Exception as e:
+                print(f"Warning: Could not update path visualization: {e}")
+            
+            print(f"Selected next waypoint: ({next_waypoint[0]:.2f}, {next_waypoint[1]:.2f})")
+            
+            # calculate direction to next waypoint
+            world_x_movement = next_waypoint[0] - current_world_pos[0]
+            world_z_movement = next_waypoint[1] - current_world_pos[1]
+            
+            # get current robot yaw orientation
+            camera_transform = create_camera_transform_matrix(current_camera_position, current_quaternion)
+            transformed_camera_matrix = apply_transformation_to_4x4_matrix(camera_transform, transformation_matrix)
+            transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
+            current_yaw_deg, _ = get_camera_yaw_angle(transformed_rotation, forward_is_neg_z=False)
+            
+            # calculate target yaw angle
+            target_yaw_rad = np.arctan2(world_x_movement, world_z_movement)
+            target_yaw_deg = np.degrees(target_yaw_rad)
+            
+            # calculate rotation difference
+            yaw_difference = target_yaw_deg - current_yaw_deg
+            
+            # normalize to [-180, 180] range
+            while yaw_difference > 180:
+                yaw_difference -= 360
+            while yaw_difference < -180:
+                yaw_difference += 360
+            
+            # calculate distance to move forward
+            forward_distance = np.sqrt(world_x_movement**2 + world_z_movement**2)
+            
+            print(f"  Next waypoint: ({next_waypoint[0]:.2f}, {next_waypoint[1]:.2f})")
+            print(f"  Direction: ({world_x_movement:.3f}, {world_z_movement:.3f})")
+            print(f"  Current yaw: {current_yaw_deg:.1f}°")
+            print(f"  Target yaw: {target_yaw_deg:.1f}°")
+            print(f"  Yaw difference: {yaw_difference:.1f}°")
+            print(f"  Forward distance: {forward_distance:.3f}m")
+            
+            # rotate to face target direction
+            rotation_command = [0.0, 0.0, yaw_difference]
+            print(f"  Rotation command: [0.0, 0.0, {yaw_difference:.1f}]")
+            
+            if send_tidybot_command(rotation_command):
+                print(f"  Sent rotation command successfully")
+                
+                if wait_for_robot_completion():
+                    print(f"  Rotation completed!")
+                else:
+                    print(f"  Warning: Rotation may not have completed properly")
+                
+                print(f"  Waiting 1.0s for SLAM position update after rotation...")
+                time.sleep(1.0)
+                    
+                # move forward in the now-aligned direction
+                robot_current_yaw = target_yaw_deg
+                yaw_difference_from_initial = robot_current_yaw - baseline_yaw
+                
+                # robot wants to move forward in curr dir
+                local_forward = forward_distance
+                local_right = 0.0
+                
+                # convert local movement to initial yaw's global frame
+                yaw_diff_rad = np.radians(yaw_difference_from_initial)
+                global_x_in_initial_frame =  local_forward * np.sin(yaw_diff_rad) + local_right * np.cos(yaw_diff_rad)
+                global_y_in_initial_frame =  local_forward * np.cos(yaw_diff_rad) - local_right * np.sin(yaw_diff_rad)
+                
+                # TidyBot command in initial yaw's global frame
+                forward_command = [global_y_in_initial_frame, global_x_in_initial_frame, 0.0]
+                
+                print(f"  Robot current yaw: {robot_current_yaw:.1f}°")
+                print(f"  Initial baseline yaw: {baseline_yaw:.1f}°")
+                print(f"  Yaw difference from initial: {yaw_difference_from_initial:.1f}°")
+                print(f"  Local movement: forward={local_forward:.3f}m, right={local_right:.3f}m")
+                print(f"  Global movement (initial yaw frame): x={global_x_in_initial_frame:.3f}m, y={global_y_in_initial_frame:.3f}m")
+                print(f"  Forward command (initial yaw frame): [{forward_command[0]:.3f}, {forward_command[1]:.3f}, {forward_command[2]:.1f}]")
+                
+                if send_tidybot_command(forward_command):
+                    print(f"  Sent forward command successfully")
+                    
+                    if wait_for_robot_completion():
+                        print(f"  Forward movement completed!")
+                    else:
+                        print(f"  Warning: Forward movement may not have completed properly")
+                    
+                    print(f"  Waiting 1.0s for robot to settle and SLAM position update...")
+                    time.sleep(1.0)
+                    
+                    print(f"  Refreshing camera position for next iteration...")
+                    try:
+                        for i in range(3):
+                            test_pos, test_quat, _ = read_camera_position()
+                            time.sleep(0.1)
+                        print(f"  Position refresh completed")
+                    except Exception as e:
+                        print(f"  Warning: Could not refresh position: {e}")
+                    
+                    waypoint_count += 1
+                else:
+                    print(f"  Failed to send forward command")
+                    return False
+            else:
+                print(f"  Failed to send rotation command")
+                return False
+                
+        except Exception as e:
+            print(f"Error during dynamic re-planning: {e}")
             return False
     
-    print(f"\nA* waypoint sequence completed! Executed {len(waypoint_commands)} waypoints.")
+    if waypoint_count >= max_waypoints:
+        print(f"Reached maximum waypoint limit ({max_waypoints}), stopping navigation")
+        return False
+    
+    print(f"\nDynamic A* navigation completed! Executed {waypoint_count} waypoints with re-planning.")
     return True
 
 
@@ -697,19 +808,21 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                     if status_display:
                         status_display.value = status_message
                     return None
-                elif not astar_planner.is_free(start_row, start_col, use_eroded=True):
-                    status_message = "CURRENT POSITION OBSTRUCTED - Robot is in an obstacle area"
-                    print("Current position is not free!")
-                    if status_display:
-                        status_display.value = status_message
-                    return None
-                
-                # destination is free, try A* planning
-                path_waypoints = astar_planner.plan_path(start_x, start_z, goal_x, goal_z, use_eroded=True, simplify="string_pull")
+
+                # use two-stage planning
+                path_waypoints = astar_planner.plan_safe_path(
+                    start_x=start_x, 
+                    start_z=start_z,
+                    goal_x=goal_x, 
+                    goal_z=goal_z,
+                    use_eroded=True,
+                    simplify="string_pull"
+                )
                 
                 if path_waypoints:
-                    status_message = f"PATH AVAILABLE - {len(path_waypoints)} waypoints found"
-                    print(f"A* path found with {len(path_waypoints)} waypoints:")
+                    status_message = f"SAFE PATH - {len(path_waypoints)} waypoints found (two-stage if needed)"
+                    print(f"Safe A* path found with {len(path_waypoints)} waypoints:")
+                    
                     for i, (x, z) in enumerate(path_waypoints):
                         print(f"  Waypoint {i}: ({x:.2f}, {z:.2f})")
                     
@@ -723,7 +836,7 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                     # send waypoint sequence to TidyBot
                     if len(path_waypoints) > 1:
                         print("Sending A* waypoint sequence to TidyBot...")
-                        if send_astar_waypoint_sequence(path_waypoints, transformed_current, baseline_yaw):
+                        if send_astar_waypoint_sequence(path_waypoints, transformed_current, baseline_yaw, server):
                             # waypoint sequence sent successfully
                             save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
                             print("A* waypoint sequence initiated!")
@@ -764,8 +877,8 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                             print("Failed to send TidyBot command")
                             return None
                 else:
-                    status_message = "LOCATION UNREACHABLE - No path found by A* planner"
-                    print("A* planning failed")
+                    status_message = "PATH PLANNING FAILED - No safe route found"
+                    print("A* safe path planning failed - cannot reach destination")
                     if status_display:
                         status_display.value = status_message
                     
@@ -1621,7 +1734,7 @@ if __name__ == "__main__":
             # project each point onto the ray
             projections = np.dot(point_vectors, click_direction)
             
-            # only consider points in front of the camera (positive projections)
+            # only consider points in front of the camera
             valid_mask = projections > 0
             
             if np.any(valid_mask):
