@@ -6,7 +6,7 @@ import argparse
 import threading
 import json
 from scipy.spatial.transform import Rotation as R
-from plyfile import PlyData
+from plyfile import PlyData, PlyElement
 import os
 
 # baseline yaw file path
@@ -68,9 +68,9 @@ def read_camera_position():
             try:
                 with open(camera_position_file, 'r') as f:
                     content = f.read().strip()
-                    if not content:  # File is empty
+                    if not content: 
                         retry_count += 1
-                        time.sleep(0.01)  # Small delay before retry
+                        time.sleep(0.01)  
                         continue
                     
                     data = json.loads(content)
@@ -80,22 +80,18 @@ def read_camera_position():
                     
                     return position, quaternion, timestamp
             except (json.JSONDecodeError, KeyError, ValueError, OSError) as e:
-                # Keep retrying on any error
                 retry_count += 1
-                time.sleep(0.01)  # Small delay before retry
+                time.sleep(0.01)  
                 continue
             except Exception as e:
-                # Keep retrying on any other error
                 retry_count += 1
-                time.sleep(0.01)  # Small delay before retry
+                time.sleep(0.01)  
                 continue
         else:
-            # File doesn't exist, wait a bit and retry
             retry_count += 1
-            time.sleep(0.01)  # Small delay before retry
+            time.sleep(0.01)  
             continue
     
-    # If we've exhausted all retries, return None
     return None, None, None
 
 
@@ -151,10 +147,199 @@ def save_movement_result(result, filename):
     print(f"Movement result saved to {filename}")
 
 
+def save_planning_maps_json(heightmap, planning_map, eroded_map, x_edges, z_edges, output_dir="calib-results"):
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # prepare grid info
+    grid_info = {
+        'height': heightmap.shape[0],
+        'width': heightmap.shape[1],
+        'x_min': float(x_edges[0]),
+        'x_max': float(x_edges[-1]),
+        'z_min': float(z_edges[0]),
+        'z_max': float(z_edges[-1]),
+        'cell_size': float(x_edges[1] - x_edges[0]),
+        'coordinate_system': 'world coordinates (meters)',
+        'map_values': {
+            'free': 0,
+            'obstacle': 1,
+            'unknown': -1
+        }
+    }
+    
+    # save heightmap
+    heightmap_data = heightmap.copy()
+    heightmap_data[np.isnan(heightmap_data)] = -999.0
+    
+    planning_data = {
+        'grid_info': grid_info,
+        'heightmap': heightmap_data.tolist(),
+        'planning_map': planning_map.tolist(),
+        'eroded_map': eroded_map.tolist()
+    }
+    
+    # save as JSON
+    json_path = os.path.join(output_dir, "planning_maps.json")
+    with open(json_path, 'w') as f:
+        json.dump(planning_data, f, indent=2)
+    print(f"Planning maps saved to: {json_path}")
+    
+    return json_path
+
+
+def generate_planning_maps():
+    try:
+        ply_path = "calib-results/transformed_pointcloud.ply"
+        if not os.path.exists(ply_path):
+            print(f"Error: Transformed point cloud not found at {ply_path}")
+            return False
+        
+        print("Generating planning maps from transformed point cloud...")
+        print(f"Using PLY file: {ply_path}")
+        
+        import detect_obstacles
+        
+        # arguments for detect_obstacles.py
+        class Args:
+            def __init__(self):
+                self.input = ply_path
+                self.output = None
+                self.cell_size = 0.10
+                self.height_threshold = [0.3, 1.3]
+                self.viz_clip = [-0.1, 2.0]
+                self.xlim = None
+                self.zlim = None
+                self.height_axis = 1
+                self.visualize = False
+                self.erode = 3
+                self.dilate = 2
+                self.use_open3d = False
+        
+        args = Args()
+        
+        if args.use_open3d:
+            points = detect_obstacles.load_xyz_from_ply_open3d(args.input)
+        else:
+            points = detect_obstacles.load_xyz_from_ply(args.input)
+        
+        print(f"Loaded {len(points)} points")
+        
+        # heightmap and planning map
+        print("Creating heightmap and planning map...")
+        heightmap, plan_map, x_edges, z_edges = detect_obstacles.heightmap_and_clearance(
+            points,
+            cell_size=args.cell_size,
+            height_axis=args.height_axis,
+            viz_clip=args.viz_clip,
+            clear_low=args.height_threshold[0],
+            clear_high=args.height_threshold[1]
+        )
+        
+        print(f"Created {heightmap.shape[0]}x{heightmap.shape[1]} grid")
+        print(f"Free cells: {np.sum(plan_map == 0)}")
+        print(f"Obstacle cells: {np.sum(plan_map == 1)}")
+        print(f"Unknown cells: {np.sum(plan_map == -1)}")
+        
+        # erode and dilate
+        print("Applying morphological operations...")
+        eroded_map = detect_obstacles.apply_morphological_operations(plan_map, erode_size=args.erode, dilate_size=args.dilate)
+        
+        # save planning maps
+        print("Saving planning maps...")
+        save_planning_maps_json(heightmap, plan_map, eroded_map, x_edges, z_edges)
+        
+        print("Planning maps generated successfully!")
+        return True
+        
+    except Exception as e:
+        import traceback
+        print(f"Error generating planning maps: {e}")
+        print("Full traceback:")
+        traceback.print_exc()
+        return False
+
+
+def load_astar_planner():
+    try:
+        json_path = "calib-results/planning_maps.json"
+        if not os.path.exists(json_path):
+            print(f"Error: Planning maps not found at {json_path}")
+            return None
+        
+        print(f"Loading A* planner from: {json_path}")
+        
+        # import A* planner
+        from astar_planner import AStarPlanner
+        
+        planner = AStarPlanner(json_path)
+        print("A* planner loaded successfully!")
+        
+        map_info = planner.get_map_info()
+        print("Map info:")
+        for key, value in map_info.items():
+            print(f"  {key}: {value}")
+        
+        return planner
+        
+    except Exception as e:
+        import traceback
+        print(f"Error loading A* planner: {e}")
+        print("Full traceback:")
+        traceback.print_exc()
+        return None
+
+
+def visualize_astar_path(server, path_waypoints):
+    try:
+        try:
+            server.scene["/astar_waypoints"].remove()
+        except:
+            pass
+        
+        if len(path_waypoints) < 1:
+            return
+        
+        # convert path to 3D points
+        path_points_3d = []
+        for x, z in path_waypoints:
+            path_points_3d.append([x, 0.3, z])
+        
+        path_points_3d = np.array(path_points_3d)
+        
+        # create colors for waypoints
+        waypoint_colors = []
+        for i in range(len(path_points_3d)):
+            if i == 0:
+                # start point - bright green
+                waypoint_colors.append([0.0, 1.0, 0.0])
+            elif i == len(path_points_3d) - 1:
+                # end point - bright red  
+                waypoint_colors.append([1.0, 0.0, 0.0])
+            else:
+                # intermediate points - bright blue
+                waypoint_colors.append([0.0, 0.5, 1.0])
+        
+        # add waypoint markers
+        server.scene.add_point_cloud(
+            "/astar_waypoints",
+            points=path_points_3d,
+            colors=np.array(waypoint_colors),
+            point_size=0.05,
+        )
+        
+        print(f"Visualized A* path with {len(path_waypoints)} waypoints:")
+        print(f"  Start: ({path_waypoints[0][0]:.2f}, {path_waypoints[0][1]:.2f})")
+        print(f"  Goal:  ({path_waypoints[-1][0]:.2f}, {path_waypoints[-1][1]:.2f})")
+        print(f"  {len(path_waypoints)-2} intermediate waypoints")
+        
+    except Exception as e:
+        print(f"Error visualizing A* waypoints: {e}")
+
+
 def send_tidybot_command(tidybot_command):
     command_file = "calib-results/runtime/robot_commands.txt"
     
-    # Format: {'type': 'tidybot_command', 'command': [y, x, theta]}
+    # {'type': 'tidybot_command', 'command': [y, x, theta]}
     command = {
         'type': 'tidybot_command',
         'command': tidybot_command
@@ -169,6 +354,280 @@ def send_tidybot_command(tidybot_command):
     except Exception as e:
         print(f"Error sending command: {e}")
         return False
+
+
+def wait_for_robot_completion(timeout=30.0):
+    """Wait for robot command to complete by monitoring result file."""
+    result_file = "calib-results/runtime/robot_results.txt"
+    start_time = time.time()
+    
+    print("  Waiting for robot completion...")
+    
+    while time.time() - start_time < timeout:
+        try:
+            if os.path.exists(result_file):
+                with open(result_file, 'r') as f:
+                    content = f.read().strip()
+                    if content:
+                        result = json.loads(content)
+                        if result.get('success', False):
+                            # clear result file for next command
+                            with open(result_file, 'w') as f:
+                                f.write("")
+                            return True
+                        elif 'success' in result and not result['success']:
+                            print(f"  Robot command failed: {result.get('message', 'Unknown error')}")
+                            return False
+        except Exception as e:
+            pass
+        
+        time.sleep(0.2)
+    
+    print(f"  Timeout waiting for robot completion ({timeout}s)")
+    return False
+
+
+# send with dynamic re-planning after each waypoint
+def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw, server):
+    global astar_planner, transformation_matrix
+    
+    if not path_waypoints or len(path_waypoints) < 2:
+        print("No valid A* path to execute")
+        return False
+    
+    # store the final destination
+    final_destination = path_waypoints[-1]
+    print(f"Starting dynamic A* navigation to final destination: ({final_destination[0]:.2f}, {final_destination[1]:.2f})")
+    
+    waypoint_count = 0
+    max_waypoints = 20
+    
+    while waypoint_count < max_waypoints:
+        # get current camera position and transform
+        try:
+            current_camera_position, current_quaternion, _ = read_camera_position()
+            if transformation_matrix is not None:
+                current_homogeneous = np.append(current_camera_position, 1)
+                transformed_current = transformation_matrix @ current_homogeneous
+                current_world_pos = (transformed_current[0], transformed_current[2])
+            else:
+                current_world_pos = (current_camera_position[0], current_camera_position[2])
+            
+            print(f"\nStep {waypoint_count + 1}: Current position: ({current_world_pos[0]:.2f}, {current_world_pos[1]:.2f})")
+            
+            distance_to_goal = np.sqrt((final_destination[0] - current_world_pos[0])**2 + 
+                                     (final_destination[1] - current_world_pos[1])**2)
+            
+            if distance_to_goal < 0.3:  # within 30cm of destination
+                print(f"Reached destination! Distance to goal: {distance_to_goal:.3f}m")
+                break
+            
+            # recalculate safe path from current position to destination
+            print(f"Recalculating safe path from current position to destination...")
+            current_path = astar_planner.plan_safe_path(
+                current_world_pos[0], current_world_pos[1],
+                final_destination[0], final_destination[1],
+                use_eroded=True, simplify="string_pull"
+            )
+            
+            if not current_path or len(current_path) < 2:
+                print("Failed to find safe path from current position to destination!")
+                return False
+            
+            print(f"Found safe path with {len(current_path)} waypoints")
+            
+            # choose first waypoint at least MIN_HOP m. away
+            MIN_HOP = 0.20
+            next_waypoint = current_path[1]  # default next step
+            for j in range(len(current_path) - 1, 0, -1):
+                dx = current_path[j][0] - current_world_pos[0]
+                dz = current_path[j][1] - current_world_pos[1]
+                if np.hypot(dx, dz) >= MIN_HOP:
+                    next_waypoint = current_path[j]
+                    print(f"Runtime guard: Selected waypoint {j} instead of 1 (distance: {np.hypot(dx, dz):.3f}m)")
+                    break
+            
+            # update visualization with current path
+            try:
+                visualize_astar_path(server, current_path)
+                print(f"Updated visualization: safe path (two-stage if needed)")
+            except Exception as e:
+                print(f"Warning: Could not update path visualization: {e}")
+            
+            print(f"Selected next waypoint: ({next_waypoint[0]:.2f}, {next_waypoint[1]:.2f})")
+            
+            # calculate direction to next waypoint
+            world_x_movement = next_waypoint[0] - current_world_pos[0]
+            world_z_movement = next_waypoint[1] - current_world_pos[1]
+            
+            # get current robot yaw orientation
+            camera_transform = create_camera_transform_matrix(current_camera_position, current_quaternion)
+            transformed_camera_matrix = apply_transformation_to_4x4_matrix(camera_transform, transformation_matrix)
+            transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
+            current_yaw_deg, _ = get_camera_yaw_angle(transformed_rotation, forward_is_neg_z=False)
+            
+            # calculate target yaw angle
+            target_yaw_rad = np.arctan2(world_x_movement, world_z_movement)
+            target_yaw_deg = np.degrees(target_yaw_rad)
+            
+            # calculate rotation difference
+            yaw_difference = target_yaw_deg - current_yaw_deg
+            
+            # normalize to [-180, 180] range
+            while yaw_difference > 180:
+                yaw_difference -= 360
+            while yaw_difference < -180:
+                yaw_difference += 360
+            
+            # calculate distance to move forward
+            forward_distance = np.sqrt(world_x_movement**2 + world_z_movement**2)
+            
+            print(f"  Next waypoint: ({next_waypoint[0]:.2f}, {next_waypoint[1]:.2f})")
+            print(f"  Direction: ({world_x_movement:.3f}, {world_z_movement:.3f})")
+            print(f"  Current yaw: {current_yaw_deg:.1f}°")
+            print(f"  Target yaw: {target_yaw_deg:.1f}°")
+            print(f"  Yaw difference: {yaw_difference:.1f}°")
+            print(f"  Forward distance: {forward_distance:.3f}m")
+            
+            # rotate to face target direction
+            rotation_command = [0.0, 0.0, yaw_difference]
+            print(f"  Rotation command: [0.0, 0.0, {yaw_difference:.1f}]")
+            
+            if send_tidybot_command(rotation_command):
+                print(f"  Sent rotation command successfully")
+                
+                if wait_for_robot_completion():
+                    print(f"  Rotation completed!")
+                else:
+                    print(f"  Warning: Rotation may not have completed properly")
+                
+                print(f"  Waiting 1.0s for SLAM position update after rotation...")
+                time.sleep(1.0)
+                    
+                # move forward in the now-aligned direction
+                robot_current_yaw = target_yaw_deg
+                yaw_difference_from_initial = robot_current_yaw - baseline_yaw
+                
+                # robot wants to move forward in curr dir
+                local_forward = forward_distance
+                local_right = 0.0
+                
+                # convert local movement to initial yaw's global frame
+                yaw_diff_rad = np.radians(yaw_difference_from_initial)
+                global_x_in_initial_frame =  local_forward * np.sin(yaw_diff_rad) + local_right * np.cos(yaw_diff_rad)
+                global_y_in_initial_frame =  local_forward * np.cos(yaw_diff_rad) - local_right * np.sin(yaw_diff_rad)
+                
+                # TidyBot command in initial yaw's global frame
+                forward_command = [global_y_in_initial_frame, global_x_in_initial_frame, 0.0]
+                
+                print(f"  Robot current yaw: {robot_current_yaw:.1f}°")
+                print(f"  Initial baseline yaw: {baseline_yaw:.1f}°")
+                print(f"  Yaw difference from initial: {yaw_difference_from_initial:.1f}°")
+                print(f"  Local movement: forward={local_forward:.3f}m, right={local_right:.3f}m")
+                print(f"  Global movement (initial yaw frame): x={global_x_in_initial_frame:.3f}m, y={global_y_in_initial_frame:.3f}m")
+                print(f"  Forward command (initial yaw frame): [{forward_command[0]:.3f}, {forward_command[1]:.3f}, {forward_command[2]:.1f}]")
+                
+                if send_tidybot_command(forward_command):
+                    print(f"  Sent forward command successfully")
+                    
+                    if wait_for_robot_completion():
+                        print(f"  Forward movement completed!")
+                    else:
+                        print(f"  Warning: Forward movement may not have completed properly")
+                    
+                    print(f"  Waiting 1.0s for robot to settle and SLAM position update...")
+                    time.sleep(1.0)
+                    
+                    print(f"  Refreshing camera position for next iteration...")
+                    try:
+                        for i in range(3):
+                            test_pos, test_quat, _ = read_camera_position()
+                            time.sleep(0.1)
+                        print(f"  Position refresh completed")
+                    except Exception as e:
+                        print(f"  Warning: Could not refresh position: {e}")
+                    
+                    waypoint_count += 1
+                else:
+                    print(f"  Failed to send forward command")
+                    return False
+            else:
+                print(f"  Failed to send rotation command")
+                return False
+                
+        except Exception as e:
+            print(f"Error during dynamic re-planning: {e}")
+            return False
+    
+    if waypoint_count >= max_waypoints:
+        print(f"Reached maximum waypoint limit ({max_waypoints}), stopping navigation")
+        return False
+    
+    print(f"\nDynamic A* navigation completed! Executed {waypoint_count} waypoints with re-planning.")
+    return True
+
+
+def get_next_waypoint_command():
+    sequence_file = "calib-results/runtime/astar_waypoint_sequence.json"
+    
+    try:
+        if not os.path.exists(sequence_file):
+            return None
+        
+        with open(sequence_file, 'r') as f:
+            sequence_data = json.load(f)
+        
+        if sequence_data['status'] != 'ready':
+            return None
+        
+        current_waypoint = sequence_data['current_waypoint']
+        total_waypoints = sequence_data['total_waypoints']
+        
+        if current_waypoint >= total_waypoints - 1:
+            # sequence completed
+            sequence_data['status'] = 'completed'
+            with open(sequence_file, 'w') as f:
+                json.dump(sequence_data, f, indent=2)
+            print("A* waypoint sequence completed!")
+            return None
+        
+        # get next waypoint command
+        next_waypoint_idx = current_waypoint + 1
+        next_command_data = sequence_data['commands'][next_waypoint_idx]
+        
+        # update sequence progress
+        sequence_data['current_waypoint'] = next_waypoint_idx
+        with open(sequence_file, 'w') as f:
+            json.dump(sequence_data, f, indent=2)
+        
+        print(f"Next waypoint ({next_waypoint_idx + 1}/{total_waypoints}): {next_command_data['command']}")
+        return next_command_data['command']
+        
+    except Exception as e:
+        print(f"Error getting next waypoint command: {e}")
+        return None
+
+
+def check_waypoint_sequence_status():
+    sequence_file = "calib-results/runtime/astar_waypoint_sequence.json"
+    
+    try:
+        if not os.path.exists(sequence_file):
+            return {'status': 'none', 'progress': None}
+        
+        with open(sequence_file, 'r') as f:
+            sequence_data = json.load(f)
+        
+        return {
+            'status': sequence_data['status'],
+            'current_waypoint': sequence_data['current_waypoint'],
+            'total_waypoints': sequence_data['total_waypoints'],
+            'progress': f"{sequence_data['current_waypoint'] + 1}/{sequence_data['total_waypoints']}"
+        }
+        
+    except Exception as e:
+        print(f"Error checking waypoint sequence status: {e}")
+        return {'status': 'error', 'progress': None}
 
 
 def add_camera_position_dot(server, transformation_matrix):    
@@ -249,7 +708,7 @@ def add_camera_position_dot(server, transformation_matrix):
         return None
 
 
-def process_clicked_point(clicked_point, transformation_matrix):
+def process_clicked_point(clicked_point, transformation_matrix, astar_planner=None, server=None, status_display=None):
     # get current camera position
     current_camera_position, current_quaternion, _ = read_camera_position()
     
@@ -284,14 +743,12 @@ def process_clicked_point(clicked_point, transformation_matrix):
     movement_result = calculate_movement(transformed_current, destination_point)
     
     if movement_result:
-        print(f"\nMOVEMENT CALCULATION RESULTS:")
-        print(f"   Current Position (Point A): {movement_result['point_a']}")
-        print(f"   Destination (Point B): {movement_result['point_b']}")
-        print(f"   Flattened Current: {movement_result['flat_a']}")
-        print(f"   Flattened Destination: {movement_result['flat_b']}")
-        print(f"   World X movement: {movement_result['x_movement']:.3f}m")
-        print(f"   World Y movement: {movement_result['y_movement']:.3f}m")
-        print(f"   World Z movement: {movement_result['z_movement']:.3f}m")
+        print(f"Movement calculation:")
+        print(f"  Current Position: {movement_result['point_a']}")
+        print(f"  Destination: {movement_result['point_b']}")
+        print(f"  World X movement: {movement_result['x_movement']:.3f}m")
+        print(f"  World Y movement: {movement_result['y_movement']:.3f}m")
+        print(f"  World Z movement: {movement_result['z_movement']:.3f}m")
         
         # transform world movement to robot global coordinates w/ baseline yaw
         world_x = movement_result['x_movement']
@@ -306,46 +763,148 @@ def process_clicked_point(clicked_point, transformation_matrix):
             transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
             current_signed_yaw, _ = get_camera_yaw_angle(transformed_rotation, forward_is_neg_z=False)
             baseline_yaw = ensure_initial_yaw_saved(current_signed_yaw)
-            print(f"   Baseline yaw not found; using current yaw {baseline_yaw:.1f}° and saving it.")
+            print(f"  Baseline yaw not found; using current yaw {baseline_yaw:.1f}° and saving it.")
         else:
             baseline_yaw = initial_yaw
-            print(f"   Using baseline yaw: {baseline_yaw:.1f}°")
+            print(f"  Using baseline yaw: {baseline_yaw:.1f}°")
         yaw_rad = np.radians(baseline_yaw)
         
         # apply 2D rotation transformation with baseline yaw
         global_x =  world_x * np.cos(-yaw_rad) + world_z * np.sin(-yaw_rad)
         global_z = -world_x * np.sin(-yaw_rad) + world_z * np.cos(-yaw_rad)
         
-        print(f"   Global X movement: {global_x:.3f}m")
-        print(f"   Global Y movement: {world_y:.3f}m")
-        print(f"   Global Z movement: {global_z:.3f}m")
-        print(f"   Using baseline yaw: {baseline_yaw:.1f} degrees")
+        print(f"  Global X movement: {global_x:.3f}m")
+        print(f"  Global Y movement: {world_y:.3f}m")
+        print(f"  Global Z movement: {global_z:.3f}m")
+        print(f"  Using baseline yaw: {baseline_yaw:.1f} degrees")
         
-        # TidyBot commands
-        tidybot_x = global_x
-        tidybot_y = global_z 
-        tidybot_theta = 0.0  # degrees
+        # A* path planning
+        path_waypoints = None
+        status_message = "Unknown status"
         
-        print(f"   TidyBot X movement (global): {tidybot_x:.3f}m")
-        print(f"   TidyBot Y movement (global): {tidybot_y:.3f}m")
-        print(f"   TidyBot rotation (theta): {tidybot_theta:.1f} degrees")
-        print(f"   TidyBot command: [{tidybot_y:.3f}, {tidybot_x:.3f}, {tidybot_theta:.1f}]")
-        
-        # send command to send_cmd.py
-        tidybot_command = [tidybot_y, tidybot_x, tidybot_theta]
-        if send_tidybot_command(tidybot_command):
-            print(" TidyBot command sent successfully!")
+        if astar_planner is not None:
+            try:
+                print("A* path planning:")
+                start_x, start_z = transformed_current[0], transformed_current[2]
+                goal_x, goal_z = destination_point[0], destination_point[2]
+                
+                # check if destination is in a free cell
+                goal_row, goal_col = astar_planner.world_to_grid(goal_x, goal_z)
+                start_row, start_col = astar_planner.world_to_grid(start_x, start_z)
+                
+                print(f"Start grid position: ({start_row}, {start_col})")
+                print(f"Goal grid position: ({goal_row}, {goal_col})")
+                
+                # check if goal is valid and free
+                if not astar_planner.is_valid(goal_row, goal_col):
+                    status_message = "LOCATION OUT OF BOUNDS - Click within the mapped area"
+                    print("Goal position is outside the mapped area!")
+                    if status_display:
+                        status_display.value = status_message
+                    return None
+                elif not astar_planner.is_free(goal_row, goal_col, use_eroded=True):
+                    # check what type of obstacle
+                    planning_val = astar_planner.planning_map[goal_row, goal_col]
+                    eroded_val = astar_planner.eroded_map[goal_row, goal_col]
+                    
+                    if planning_val == 1:
+                        status_message = "LOCATION OBSTRUCTED - Obstacle detected at destination"
+                    elif eroded_val == 1:
+                        status_message = "LOCATION OBSTRUCTED - Too close to obstacles"
+                    else:
+                        status_message = "LOCATION OBSTRUCTED - Unknown obstacle type"
+                    
+                    print(f"Goal position is not free! Planning: {planning_val}, Eroded: {eroded_val}")
+                    if status_display:
+                        status_display.value = status_message
+                    return None
+
+                # use two-stage planning
+                path_waypoints = astar_planner.plan_safe_path(
+                    start_x=start_x, 
+                    start_z=start_z,
+                    goal_x=goal_x, 
+                    goal_z=goal_z,
+                    use_eroded=True,
+                    simplify="string_pull"
+                )
+                
+                if path_waypoints:
+                    status_message = f"SAFE PATH - {len(path_waypoints)} waypoints found (two-stage if needed)"
+                    print(f"Safe A* path found with {len(path_waypoints)} waypoints:")
+                    
+                    for i, (x, z) in enumerate(path_waypoints):
+                        print(f"  Waypoint {i}: ({x:.2f}, {z:.2f})")
+                    
+                    if status_display:
+                        status_display.value = status_message
+                    
+                    # visualize path in viser
+                    if server is not None:
+                        visualize_astar_path(server, path_waypoints)
+                    
+                    # send waypoint sequence to TidyBot
+                    if len(path_waypoints) > 1:
+                        print("Sending A* waypoint sequence to TidyBot...")
+                        if send_astar_waypoint_sequence(path_waypoints, transformed_current, baseline_yaw, server):
+                            # waypoint sequence sent successfully
+                            save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
+                            print("A* waypoint sequence initiated!")
+                            
+                            return {
+                                'status': 'astar_sequence_started',
+                                'movement_result': movement_result,
+                                'waypoint_count': len(path_waypoints)
+                            }
+                        else:
+                            print("Failed to send A* waypoint sequence")
+                            return None
+                    else:
+                        # single waypoint - send direct TidyBot command
+                        print("A* path has only start point - sending direct TidyBot command")
+                        
+                        # TidyBot commands
+                        tidybot_x = global_x
+                        tidybot_y = global_z 
+                        tidybot_theta = 0.0  # degrees
+                        
+                        print(f"  TidyBot X movement (global): {tidybot_x:.3f}m")
+                        print(f"  TidyBot Y movement (global): {tidybot_y:.3f}m")
+                        print(f"  TidyBot rotation (theta): {tidybot_theta:.1f} degrees")
+                        print(f"  TidyBot command: [{tidybot_y:.3f}, {tidybot_x:.3f}, {tidybot_theta:.1f}]")
+                        
+                        # send command to send_cmd.py
+                        tidybot_command = [tidybot_y, tidybot_x, tidybot_theta]
+                        if send_tidybot_command(tidybot_command):
+                            print("TidyBot command sent successfully!")
+                            save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
+                            return {
+                                'status': 'direct_movement_sent',
+                                'movement_result': movement_result,
+                                'tidybot_command': tidybot_command
+                            }
+                        else:
+                            print("Failed to send TidyBot command")
+                            return None
+                else:
+                    status_message = "PATH PLANNING FAILED - No safe route found"
+                    print("A* safe path planning failed - cannot reach destination")
+                    if status_display:
+                        status_display.value = status_message
+                    
+            except Exception as e:
+                status_message = f"PLANNING ERROR - {str(e)}"
+                print(f"A* planning error: {e}")
+                if status_display:
+                    status_display.value = status_message
         else:
-            print(" Failed to send TidyBot command")
+            status_message = "A* PLANNER NOT AVAILABLE"
+            print("A* planner not available")
+            if status_display:
+                status_display.value = status_message
         
-        # save result
-        save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
-        print("Movement calculated and saved!")
-        
-        return {
-            'status': 'movement_calculated',
-            'movement_result': movement_result
-        }
+        # if we reach here, A* planning was not successful
+        return None
     else:
         print("Failed to calculate movement")
         return None
@@ -367,6 +926,32 @@ def load_ply_file(ply_path):
     print(f"Loaded {len(points)} points from PLY file")
     
     return points, colors
+
+
+def save_ply_file(points, colors, output_path):
+    print(f"Saving transformed point cloud to: {output_path}")
+    
+    # ensure colors are in 0-255 range
+    if colors.max() <= 1.0:
+        colors_int = (colors * 255).astype(np.uint8)
+    else:
+        colors_int = colors.astype(np.uint8)
+    
+    # create vertex array for PLY format
+    vertices = np.array([(points[i,0], points[i,1], points[i,2], 
+                         colors_int[i,0], colors_int[i,1], colors_int[i,2]) 
+                        for i in range(len(points))],
+                       dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+                              ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')])
+    
+    # create PLY element
+    vertex_element = PlyElement.describe(vertices, 'vertex')
+    
+    # ensure directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    PlyData([vertex_element]).write(output_path)
+    print(f"Saved {len(points)} points to PLY file: {output_path}")
 
 
 # convert degrees to rotation matrix for z-axis
@@ -466,9 +1051,9 @@ def apply_transformation_to_points(points, transformation_matrix):
     return transformed_points
 
 # some hardcoded eyeballed rotations to align transformed point cloud with original axes
-def create_final_transformation_matrix(hand_eye_transform):
+def create_final_transformation_matrix(hand_eye_transform, y_rot_deg=5.0, z_rot_deg=3.0, x_rot_deg=-9.0, y_trans=0.28):
     # y-axis rotation
-    y_angle_rad = np.radians(-25)
+    y_angle_rad = np.radians(y_rot_deg)
     cos_y = np.cos(y_angle_rad)
     sin_y = np.sin(y_angle_rad)
     
@@ -480,7 +1065,7 @@ def create_final_transformation_matrix(hand_eye_transform):
     ])
     
     # z-axis rotation
-    z_angle_rad = np.radians(-5)
+    z_angle_rad = np.radians(z_rot_deg)
     cos_z = np.cos(z_angle_rad)
     sin_z = np.sin(z_angle_rad)
     
@@ -492,7 +1077,7 @@ def create_final_transformation_matrix(hand_eye_transform):
     ])
     
     # x-axis rotation
-    x_angle_rad = np.radians(-12)
+    x_angle_rad = np.radians(x_rot_deg)
     cos_x = np.cos(x_angle_rad)
     sin_x = np.sin(x_angle_rad)
     
@@ -503,10 +1088,10 @@ def create_final_transformation_matrix(hand_eye_transform):
         [0, 0,      0,      1]
     ])
     
-    # up on y-axis
+    # y-axis translation
     translation_matrix = np.array([
         [1, 0, 0, 0],
-        [0, 1, 0, 0.4],
+        [0, 1, 0, y_trans],
         [0, 0, 1, 0],
         [0, 0, 0, 1]
     ])
@@ -529,6 +1114,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hand-eye calibration visualization tool")
     parser.add_argument("--save", action="store_true", 
                        help="Save transformation matrices to calib-results directory")
+    parser.add_argument("--save-transformed-ply", action="store_true",
+                       help="Save the transformed point cloud as PLY file")
+    parser.add_argument("--saved-folder", required=True,
+                       help="Path to saved state folder containing point_cloud.ply (e.g., saved-states/test-recalib)")
     args = parser.parse_args()
 
     server = viser.ViserServer()
@@ -548,7 +1137,36 @@ if __name__ == "__main__":
     transformation_matrix = load_transformation_matrix()
     print("Movement calculation system ready!")
     
+    # generate planning maps and initialize A* planner
+    print("Initializing A* path planning...")
+    
+    # generate planning maps
+    print("Generating planning maps...")
+    planning_maps_generated = generate_planning_maps()
+    
+    astar_planner = None
+    if planning_maps_generated:
+        print("Planning maps generated successfully")
+        
+        # load A* planner
+        print("Loading A* planner...")
+        astar_planner = load_astar_planner()
+        
+        if astar_planner:
+            print("A* planner loaded successfully!")
+            print("A* path planning is ready!")
+        else:
+            print("Failed to load A* planner")
+    else:
+        print("Failed to generate planning maps")
+    
+    if astar_planner is None:
+        print("WARNING: A* planner failed to initialize")
+        print("Falling back to direct movement")
+    
     print("Click any point to calculate movement from current camera position to that destination.")
+    if astar_planner:
+        print("A* path planning will be used to find safe routes and visualize trajectories.")
     print("Live camera position will be read from calib-results/runtime/camera_position.txt (make sure main.py is running)")
     
     # add red dot for current camera position
@@ -722,8 +1340,14 @@ if __name__ == "__main__":
     print(f"Hand-eye calibration transformation matrix:")
     print(T_cam2base)
 
-    # load the ply file
-    ply_file_path = "saved-states/test-recalib/point_cloud.ply"
+    # load the ply file from specified save folder
+    ply_file_path = os.path.join(args.saved_folder, "point_cloud.ply")
+    if not os.path.exists(ply_file_path):
+        print(f"Error: point_cloud.ply not found in {args.saved_folder}")
+        print(f"Expected file: {ply_file_path}")
+        exit(1)
+    
+    print(f"Loading point cloud from: {ply_file_path}")
     original_points, original_colors = load_ply_file(ply_file_path)
 
     # keep original points (no rotation)
@@ -740,6 +1364,20 @@ if __name__ == "__main__":
     # create transformed point cloud by applying transformation to every point
     print("Creating transformed point cloud...")
     transformed_points = apply_transformation_to_points(original_points, transformed_axes)
+    
+    # make these variables accessible to slider callbacks
+    global transformed_points_global, transformed_axes_global
+    transformed_points_global = transformed_points
+    transformed_axes_global = transformed_axes
+    
+    # always save transformed PLY for A* planning (do this first)
+    transformed_ply_path = os.path.join("calib-results", "transformed_pointcloud.ply")
+    print(f"Saving transformed point cloud for A* planning to: {transformed_ply_path}")
+    save_ply_file(transformed_points, original_colors, transformed_ply_path)
+    
+    # also save if user requested it explicitly (redundant but clear)
+    if args.save_transformed_ply:
+        print("User also requested saving transformed PLY (already saved above)")
     
     # save transformation matrices to calib-results directory
     if args.save:
@@ -826,22 +1464,235 @@ if __name__ == "__main__":
         visible=True
     )
     
+    # create obstacle grid visualization
+    def create_obstacle_grid_points(planner, height_y=0.0):
+        if planner is None:
+            return np.array([]), np.array([])
+            
+        points = []
+        colors = []
+        
+        # create points for each cell
+        for row in range(planner.height):
+            for col in range(planner.width):
+                # get world coordinates of cell center
+                x, z = planner.grid_to_world(row, col)
+                
+                # use processed map
+                processed_val = planner.eroded_map[row, col]
+                
+                if processed_val == 0:  # free
+                    color = [0.0, 1.0, 0.0]
+                elif processed_val == 1:  # obstacle
+                    color = [1.0, 0.0, 0.0]
+                else:  # unknown
+                    color = [0.5, 0.5, 0.5]
+                
+                # add point at specified height
+                points.append([x, height_y, z])
+                colors.append(color)
+        
+        return np.array(points), np.array(colors)
+    
+    def update_obstacle_grid():
+        if show_obstacle_grid.value and astar_planner is not None:
+            # create grid points
+            grid_points, grid_colors = create_obstacle_grid_points(astar_planner, grid_height.value)
+            
+            if len(grid_points) > 0:
+                # add or update obstacle grid
+                server.scene.add_point_cloud(
+                    "/obstacle_grid",
+                    points=grid_points,
+                    colors=grid_colors,
+                    point_size=0.01,
+                )
+            else:
+                # remove grid if no points
+                try:
+                    server.scene["/obstacle_grid"].remove()
+                except:
+                    pass
+        else:
+            # remove grid when disabled
+            try:
+                server.scene["/obstacle_grid"].remove()
+            except:
+                pass
+
     # create GUI elements first
     with server.gui.add_folder("Coordinate Display"):
-        server.gui.add_markdown(
-            "**Click on points in the transformed point cloud to display their coordinates.**\n\n"
-            "A yellow marker will appear at the clicked point for 3 seconds."
-        )
-        
         # add a text display for the last clicked coordinate
         coord_display = server.gui.add_text(
             "Last clicked coordinate",
             initial_value="No point clicked yet",
-            disabled=True
+            disabled=False
         )
+        
+        # add a status display for path planning
+        path_status_display = server.gui.add_text(
+            "Path Planning Status",
+            initial_value="Click a point to begin",
+            disabled=False
+        )
+    
+    # add obstacle grid visualization controls
+    with server.gui.add_folder("Obstacle Grid Visualization"):
+        show_obstacle_grid = server.gui.add_checkbox(
+            "Show Obstacle Grid",
+            initial_value=False
+        )
+        
+        grid_height = server.gui.add_slider(
+            "Grid Height (Y)",
+            min=-2.0,
+            max=2.0,
+            step=0.01,
+            initial_value=0.5
+        )
+    
+    # add transformation adjustment sliders
+    with server.gui.add_folder("Alignment Adjustment"):
+        
+        y_rotation_slider = server.gui.add_slider(
+            "Y Rotation (degrees)",
+            min=-180.0,
+            max=180.0,
+            step=0.5,
+            initial_value=5.0
+        )
+        
+        z_rotation_slider = server.gui.add_slider(
+            "Z Rotation (degrees)", 
+            min=-180.0,
+            max=180.0,
+            step=0.5,
+            initial_value=3.0
+        )
+        
+        x_rotation_slider = server.gui.add_slider(
+            "X Rotation (degrees)",
+            min=-180.0, 
+            max=180.0,
+            step=0.5,
+            initial_value=-9.0
+        )
+        
+        y_translation_slider = server.gui.add_slider(
+            "Y Translation (meters)",
+            min=-5.0,
+            max=5.0, 
+            step=0.01,
+            initial_value=0.28
+        )
+        
+        reset_button = server.gui.add_button("Reset to Defaults")
+        save_button = server.gui.add_button("Save Current Values")
+    
+    # function to update transformation based on slider values
+    def update_transformation():
+        global transformed_points_global, transformed_axes_global
+        
+        # get current slider values
+        y_rot = y_rotation_slider.value
+        z_rot = z_rotation_slider.value  
+        x_rot = x_rotation_slider.value
+        y_trans = y_translation_slider.value
+        
+        # recalculate transformation matrix
+        hand_eye_transform = np.linalg.inv(T_cam2base)
+        transformed_axes_global = create_final_transformation_matrix(
+            hand_eye_transform, y_rot, z_rot, x_rot, y_trans
+        )
+        
+        # recalculate transformed points
+        transformed_points_global = apply_transformation_to_points(original_points, transformed_axes_global)
+        
+        # update point cloud visualization
+        try:
+            server.scene["/transformed_pointcloud"].remove()
+        except:
+            pass
+        
+        server.scene.add_point_cloud(
+            "/transformed_pointcloud",
+            points=transformed_points_global,
+            colors=original_colors,
+            point_size=0.003,
+        )
+        
+        # update transformed axes
+        try:
+            server.scene["/transformed_axes"].remove()
+        except:
+            pass
+        
+        transformed_rotation = R.from_matrix(transformed_axes_global[:3, :3]).as_quat()
+        transformed_quaternion = np.array([transformed_rotation[3], transformed_rotation[0], transformed_rotation[1], transformed_rotation[2]])
+        transformed_position = transformed_axes_global[:3, 3]
+        server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
+        
+        print(f"Updated transformation: Y={y_rot:.1f}°, Z={z_rot:.1f}°, X={x_rot:.1f}°, Y_trans={y_trans:.3f}m")
+    
+    # add callbacks to sliders
+    @y_rotation_slider.on_update
+    def _(_):
+        update_transformation()
+    
+    @z_rotation_slider.on_update  
+    def _(_):
+        update_transformation()
+        
+    @x_rotation_slider.on_update
+    def _(_):
+        update_transformation()
+        
+    @y_translation_slider.on_update
+    def _(_):
+        update_transformation()
+    
+    # obstacle grid callbacks
+    @show_obstacle_grid.on_update
+    def _(_):
+        update_obstacle_grid()
+        
+    @grid_height.on_update
+    def _(_):
+        update_obstacle_grid()
+    
+    # reset button callback
+    @reset_button.on_click
+    def _(_):
+        y_rotation_slider.value = 5.0
+        z_rotation_slider.value = 3.0
+        x_rotation_slider.value = -9.0
+        y_translation_slider.value = 0.28
+        update_transformation()
+    
+    # save button callback
+    @save_button.on_click
+    def _(_):
+        y_rot = y_rotation_slider.value
+        z_rot = z_rotation_slider.value
+        x_rot = x_rotation_slider.value
+        y_trans = y_translation_slider.value
+        
+        print("="*50)
+        print("CURRENT TRANSFORMATION VALUES:")
+        print(f"Y Rotation: {y_rot:.1f} degrees")
+        print(f"Z Rotation: {z_rot:.1f} degrees") 
+        print(f"X Rotation: {x_rot:.1f} degrees")
+        print(f"Y Translation: {y_trans:.3f} meters")
+        print("="*50)
+        print("To use these values permanently, update the function:")
+        print(f"create_final_transformation_matrix(hand_eye_transform, {y_rot}, {z_rot}, {x_rot}, {y_trans})")
+        print("="*50)
     
     # keep track of active marker handles
     active_marker_handles = {}
+    
+    # initial obstacle grid update
+    update_obstacle_grid()
     
     # state management for sequential movements
     robot_moving = False
@@ -868,7 +1719,7 @@ if __name__ == "__main__":
     
     # add click handler to the invisible sphere
     @click_catcher.on_click
-    def handle_click(event: viser.SceneNodePointerEvent) -> None:
+    def handle_click(event):
         global robot_moving, last_command_time
         
         # check if robot is currently moving
@@ -893,7 +1744,7 @@ if __name__ == "__main__":
             # project each point onto the ray
             projections = np.dot(point_vectors, click_direction)
             
-            # only consider points in front of the camera (positive projections)
+            # only consider points in front of the camera
             valid_mask = projections > 0
             
             if np.any(valid_mask):
@@ -920,7 +1771,7 @@ if __name__ == "__main__":
                     coord_display.value = coord_str
                     
                     # Process clicked point for movement calculation
-                    process_clicked_point(closest_point, transformation_matrix)
+                    process_clicked_point(closest_point, transformation_matrix, astar_planner, server, path_status_display)
                     
                     # add a temporary marker at the clicked point
                     marker_name = f"/clicked_point_{time.time()}"
@@ -1025,7 +1876,7 @@ if __name__ == "__main__":
                         point_size=0.05,
                     )
                     
-                    # create 4x4 camera transformation matrix
+                    # 4x4 camera transformation matrix
                     camera_transform = create_camera_transform_matrix(position, quaternion)
                     
                     # apply hand-eye calibration transformation to get world coordinates
