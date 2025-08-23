@@ -113,10 +113,16 @@ class AStarPlanner:
                 c += sc
 
     # to simplify path movements
-    def _line_of_sight_free(self, r0, c0, r1, c1, use_eroded=True):
+    def _line_of_sight_free(self, r0, c0, r1, c1, use_eroded=True, ignore_start_cell=False):
+        first = True
         for rr, cc in self._bresenham_line_cells(r0, c0, r1, c1):
+            if first and ignore_start_cell:
+                # skip clearance check for starting cell
+                first = False
+                continue
             if not self.has_clearance(rr, cc, clearance_radius=2, use_eroded=use_eroded):
                 return False
+            first = False
         return True
 
     def _reconstruct_path_grid(self, came_from, goal_row, goal_col):
@@ -152,7 +158,7 @@ class AStarPlanner:
         return out
 
     # greedy line of sight smoothing
-    def _string_pull(self, path_grid, use_eroded=True):
+    def _string_pull(self, path_grid, use_eroded=True, start_cell_lacks_clearance=False):
         if len(path_grid) <= 2:
             return path_grid[:]
         smoothed = [path_grid[0]]
@@ -163,7 +169,11 @@ class AStarPlanner:
             while far < len(path_grid):
                 a = path_grid[anchor_idx]
                 b = path_grid[far]
-                if self._line_of_sight_free(a[0], a[1], b[0], b[1], use_eroded=use_eroded):
+                # if start no clearance, ignore clearance on first cell in LOS
+                ignore_start = (anchor_idx == 0 and start_cell_lacks_clearance)
+                if self._line_of_sight_free(a[0], a[1], b[0], b[1],
+                                            use_eroded=use_eroded,
+                                            ignore_start_cell=ignore_start):
                     last_good = far
                     far += 1
                 else:
@@ -176,6 +186,24 @@ class AStarPlanner:
 
     def _grid_to_world_path(self, path_grid):
         return [self.grid_to_world(r, c) for (r, c) in path_grid]
+    
+    # make sure first step is at least certain distance away from start
+    def _enforce_min_first_step(self, world_path, min_first_step=0.20, use_eroded=True):
+        if len(world_path) <= 2:
+            return world_path
+        (x0, z0) = world_path[0]
+
+        # try to jump to the farthest waypoint in LOS
+        best_idx = 1
+        r0, c0 = self.world_to_grid(x0, z0)
+        for i in range(2, len(world_path)):
+            ri, ci = self.world_to_grid(*world_path[i])
+            if self._line_of_sight_free(r0, c0, ri, ci, use_eroded=use_eroded, ignore_start_cell=True):
+                best_idx = i
+        x1, z1 = world_path[best_idx]
+        if np.hypot(x1 - x0, z1 - z0) >= min_first_step:
+            return [world_path[0]] + world_path[best_idx:]
+        return world_path
     
     def find_nearest_clear_cell(self, start_row, start_col, max_radius=50, use_eroded=True):
         from collections import deque
@@ -262,14 +290,23 @@ class AStarPlanner:
                 print(f"Path found! Visited {len(visited)} nodes")
                 grid_path = self._reconstruct_path_grid(came_from, current_row, current_col)
 
+                # compute if start cell has clearance
+                start_clear = (skip_start_clearance or not use_clearance or
+                               self.has_clearance(start_row, start_col, clearance_radius=2, use_eroded=use_eroded))
+
                 # path simplification
                 if simplify in ("rle", "collinear", "dir"):
                     grid_path = self._compress_collinear(grid_path)
                 elif simplify in ("string_pull", "los", "smooth", "both"):
                     grid_path = self._compress_collinear(grid_path)
-                    grid_path = self._string_pull(grid_path, use_eroded=use_eroded)
+                    grid_path = self._string_pull(
+                        grid_path,
+                        use_eroded=use_eroded,
+                        start_cell_lacks_clearance=not start_clear
+                    )
 
                 world_path = self._grid_to_world_path(grid_path)
+                world_path = self._enforce_min_first_step(world_path, min_first_step=0.20, use_eroded=use_eroded)
                 print(f"Path length: {len(world_path)} waypoints (after simplify='{simplify}')")
                 return world_path
             
@@ -339,8 +376,13 @@ class AStarPlanner:
         # final smoothing over eroded map
         grid = [self.world_to_grid(x, z) for (x, z) in merged]
         grid = self._compress_collinear(grid)
-        grid = self._string_pull(grid, use_eroded=use_eroded)
+        grid = self._string_pull(
+            grid,
+            use_eroded=use_eroded,
+            start_cell_lacks_clearance=not start_clear
+        )
         merged_smoothed = self._grid_to_world_path(grid)
+        merged_smoothed = self._enforce_min_first_step(merged_smoothed, min_first_step=0.20, use_eroded=use_eroded)
 
         print(f"Two-stage path: {len(merged_smoothed)} waypoints after smoothing")
         return merged_smoothed

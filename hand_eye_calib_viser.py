@@ -418,7 +418,7 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
             distance_to_goal = np.sqrt((final_destination[0] - current_world_pos[0])**2 + 
                                      (final_destination[1] - current_world_pos[1])**2)
             
-            if distance_to_goal < 0.2:  # within 20cm of destination
+            if distance_to_goal < 0.3:  # within 30cm of destination
                 print(f"Reached destination! Distance to goal: {distance_to_goal:.3f}m")
                 break
             
@@ -435,7 +435,17 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
                 return False
             
             print(f"Found safe path with {len(current_path)} waypoints")
-            next_waypoint = current_path[1]  # take next step
+            
+            # choose first waypoint at least MIN_HOP m. away
+            MIN_HOP = 0.20
+            next_waypoint = current_path[1]  # default next step
+            for j in range(len(current_path) - 1, 0, -1):
+                dx = current_path[j][0] - current_world_pos[0]
+                dz = current_path[j][1] - current_world_pos[1]
+                if np.hypot(dx, dz) >= MIN_HOP:
+                    next_waypoint = current_path[j]
+                    print(f"Runtime guard: Selected waypoint {j} instead of 1 (distance: {np.hypot(dx, dz):.3f}m)")
+                    break
             
             # update visualization with current path
             try:

@@ -299,7 +299,7 @@ def main():
         print("2. Navigate to the TidyBot directory:")
         print("   cd MASt3R-SLAM/thirdparty/tidybot2")
         print("3. Start the base server:")
-        print("   python base_server.py")
+        print("   python controlled_base_server.py")
         print("4. Wait for the server to start, then run this command server")
         print("="*60)
         
