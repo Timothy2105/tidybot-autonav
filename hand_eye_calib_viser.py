@@ -289,6 +289,84 @@ def load_astar_planner():
         return None
 
 
+def has_sufficient_clearance(astar_planner, row, col, clearance_size=5):
+    if astar_planner is None:
+        return False
+    
+    # check clearance size area around pt
+    half_clearance = clearance_size // 2
+    
+    for dr in range(-half_clearance, half_clearance + 1):
+        for dc in range(-half_clearance, half_clearance + 1):
+            check_row = row + dr
+            check_col = col + dc
+            
+            # check if this cell is valid and free
+            if not (astar_planner.is_valid(check_row, check_col) and 
+                    astar_planner.is_free(check_row, check_col, use_eroded=True)):
+                return False
+    
+    return True
+
+
+def find_nearest_safe_point_with_clearance(astar_planner, target_x, target_z, max_search_radius=3.0, clearance_size=5):
+    if astar_planner is None:
+        return None
+    
+    # convert target to grid coordinates
+    target_row, target_col = astar_planner.world_to_grid(target_x, target_z)
+    
+    # search in expanding squares around the target point
+    cell_size = astar_planner.cell_size
+    max_search_cells = int(max_search_radius / cell_size)
+    
+    best_distance = float('inf')
+    best_point = None
+    
+    print(f"Searching for point with {clearance_size}x{clearance_size} clearance within {max_search_radius:.1f}m...")
+    
+    # search in expanding rings
+    for radius in range(0, max_search_cells + 1):
+        found_in_ring = False
+        
+        if radius == 0:
+            # check the original point
+            check_points = [(target_row, target_col)]
+        else:
+            # check all cells at this radius
+            check_points = []
+            for dr in range(-radius, radius + 1):
+                for dc in range(-radius, radius + 1):
+                    if abs(dr) != radius and abs(dc) != radius:
+                        continue
+                    check_points.append((target_row + dr, target_col + dc))
+        
+        for check_row, check_col in check_points:
+            # check if this cell has sufficient clearance
+            if has_sufficient_clearance(astar_planner, check_row, check_col, clearance_size):
+                # convert back to world coordinates
+                world_x, world_z = astar_planner.grid_to_world(check_row, check_col)
+                
+                # calculate actual distance
+                distance = np.sqrt((world_x - target_x)**2 + (world_z - target_z)**2)
+                
+                if distance < best_distance:
+                    best_distance = distance
+                    best_point = (world_x, world_z)
+                    found_in_ring = True
+        
+        # return closest one
+        if found_in_ring:
+            if best_distance < 0.01:
+                print(f"Original point has sufficient {clearance_size}x{clearance_size} clearance")
+            else:
+                print(f"Found point with {clearance_size}x{clearance_size} clearance {best_distance:.2f}m away from target")
+            return best_point
+    
+    print(f"No point with {clearance_size}x{clearance_size} clearance found within {max_search_radius:.1f}m radius")
+    return None
+
+
 def visualize_astar_path(server, path_waypoints):
     try:
         try:
@@ -819,29 +897,68 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                 print(f"Start grid position: ({start_row}, {start_col})")
                 print(f"Goal grid position: ({goal_row}, {goal_col})")
                 
-                # check if goal is valid and free
+                # check if goal is valid
                 if not astar_planner.is_valid(goal_row, goal_col):
                     status_message = "LOCATION OUT OF BOUNDS - Click within the mapped area"
                     print("Goal position is outside the mapped area!")
                     if status_display:
                         status_display.value = status_message
                     return None
-                elif not astar_planner.is_free(goal_row, goal_col, use_eroded=True):
-                    # check what type of obstacle
-                    planning_val = astar_planner.planning_map[goal_row, goal_col]
-                    eroded_val = astar_planner.eroded_map[goal_row, goal_col]
-                    
-                    if planning_val == 1:
-                        status_message = "LOCATION OBSTRUCTED - Obstacle detected at destination"
-                    elif eroded_val == 1:
-                        status_message = "LOCATION OBSTRUCTED - Too close to obstacles"
+                elif not has_sufficient_clearance(astar_planner, goal_row, goal_col, clearance_size=5):
+                    # find nearest point with clearance
+                    if astar_planner.is_free(goal_row, goal_col, use_eroded=True):
+                        print(f"Click position ({goal_x:.2f}, {goal_z:.2f}) is free but lacks 5x5 clearance for A* planning")
                     else:
-                        status_message = "LOCATION OBSTRUCTED - Unknown obstacle type"
+                        print(f"Click position ({goal_x:.2f}, {goal_z:.2f}) is obstructed")
                     
-                    print(f"Goal position is not free! Planning: {planning_val}, Eroded: {eroded_val}")
-                    if status_display:
-                        status_display.value = status_message
-                    return None
+                    print("Finding nearest point with sufficient clearance for A* planning...")
+                    
+                    # store original coordinates
+                    original_goal_x, original_goal_z = goal_x, goal_z
+                    
+                    nearest_safe_point = find_nearest_safe_point_with_clearance(astar_planner, goal_x, goal_z, max_search_radius=3.0, clearance_size=5)
+                    
+                    if nearest_safe_point is not None:
+                        safe_x, safe_z = nearest_safe_point
+                        
+                        # calculate distance moved
+                        distance_moved = np.sqrt((safe_x - original_goal_x)**2 + (safe_z - original_goal_z)**2)
+                        
+                        # update destination to the safe point
+                        goal_x, goal_z = safe_x, safe_z
+                        destination_point = np.array([goal_x, destination_point[1], goal_z]) 
+                        
+                        # recalculate movement result
+                        movement_result = calculate_movement(transformed_current, destination_point)
+                        if distance_moved < 0.01:
+                            status_message = f"LOCATION OK - Original point has sufficient clearance"
+                        else:
+                            status_message = f"REDIRECTED FOR CLEARANCE - Moved {distance_moved:.2f}m to point with 5x5 clearance"
+                        
+                        print(f"Using destination with clearance: ({safe_x:.2f}, {safe_z:.2f})")
+                        if status_display:
+                            status_display.value = status_message
+                            
+                        if server is not None and distance_moved >= 0.01:
+                            try:
+                                # remove existing redirect marker
+                                server.scene["/redirected_point"].remove()
+                            except:
+                                pass
+                            
+                            server.scene.add_point_cloud(
+                                "/redirected_point",
+                                points=np.array([destination_point]),
+                                colors=np.array([[0.0, 1.0, 0.0]]), 
+                                point_size=0.03,
+                            )
+                    else:
+                        # no point found
+                        status_message = "NO SUITABLE LOCATION FOUND - No point with 5x5 clearance within 3m radius"
+                        print("Could not find any point with sufficient clearance for A* planning")
+                        if status_display:
+                            status_display.value = status_message
+                        return None
 
                 # use two-stage planning
                 path_waypoints = astar_planner.plan_safe_path(
