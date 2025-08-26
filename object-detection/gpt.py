@@ -218,6 +218,37 @@ def detect_then_verify(image_path, obj, client, detect_model, verify_model, verb
     # if verifier failed to produce a point, keep detection
     return det_coords, det_conf, "detected"
 
+# save to object_pos.txt
+def save_detection_results(object_name, image_name, coordinates, confidence, stage):
+    results_file = "calib-results/runtime/object_pos.txt"
+    
+    try:
+        # ensure directory exists
+        os.makedirs(os.path.dirname(results_file), exist_ok=True)
+        
+        # prepare result data
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # format coordinates
+        coord_str = ", ".join([f"({x:.2f}%, {y:.2f}%)" for x, y in coordinates])
+        
+        # create result line
+        result_line = f"{timestamp} | {object_name} | {image_name} | {coord_str}"
+        if confidence is not None:
+            result_line += f" | confidence: {confidence:.2f}"
+        result_line += f" | stage: {stage}\n"
+        
+        # write to file 
+        with open(results_file, 'w') as f:
+            f.write(result_line)
+        
+        print(f"Detection results saved to: {results_file}")
+        return True
+        
+    except Exception as e:
+        print(f"Error saving detection results: {e}")
+        return False
+
 def check_and_clear_object_file():
     object_file = "calib-results/runtime/object.txt"
     try:
@@ -252,6 +283,9 @@ def process_object_detection(target_object, keyframe_images, client, detect_mode
             print(f"Coordinates: {coords}")
             if conf is not None:
                 print(f"{CONFIDENCE_KEY.capitalize()}: {conf:.2f}")
+
+            # save detection results to file
+            save_detection_results(target_object, image_name, coords, conf, stage)
 
             if save_annotated:
                 actual_output = output_path or f"annotated_result.png"

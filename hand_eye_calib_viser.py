@@ -1996,9 +1996,37 @@ if __name__ == "__main__":
                 update_camera_position.last_error_time = time.time()
                 print(f"Error in update_camera_position (continuing...): {e}")
 
+    def check_object_detection_results():
+        object_pos_file = "calib-results/runtime/object_pos.txt"
+        
+        try:
+            if os.path.exists(object_pos_file):
+                with open(object_pos_file, 'r') as f:
+                    content = f.read().strip()
+                    if content:
+                        print("\n" + "="*60)
+                        print("OBJECT DETECTION RESULT RECEIVED:")
+                        print("="*60)
+                        print(content)
+                        print("="*60)
+                        
+                        # clear the file after reading
+                        with open(object_pos_file, 'w') as f:
+                            f.write("")
+                        
+                        print("Object detection file cleared, ready for next detection")
+                        return content
+        except Exception as e:
+            print(f"Error checking object detection results: {e}")
+        
+        return None
+
     while True:
         # update camera position every 2 seconds
         update_camera_position()
+        
+        # check for object detection results
+        check_object_detection_results()
         
         # check robot status if it's moving
         if robot_moving:
