@@ -9,6 +9,7 @@ movement_results.txt
 robot_results.txt
 robot_commands.txt
 initial_yaw.txt
+annotated_result.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

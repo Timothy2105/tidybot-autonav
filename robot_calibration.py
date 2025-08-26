@@ -14,21 +14,14 @@ from mast3r_slam.robot_interface import RobotInterface
 
 
 def get_camera_position_from_slam():
-    """
-    Try to read the current camera position and orientation from SLAM system.
-    This reads from a shared file that the main SLAM process writes to.
-    
-    Returns:
-        tuple: (x, y, z, quaternion) camera position and orientation or None if not available
-    """
     try:
-        # Look for a file that contains the current camera position and orientation
+        # look for a file that contains the current camera position and orientation
         camera_pos_file = Path("calib-results/runtime/camera_position.txt")
         if camera_pos_file.exists():
             with open(camera_pos_file, 'r') as f:
                 data = json.load(f)
                 position = (data['x'], data['y'], data['z'])
-                quaternion = data.get('quaternion', [1, 0, 0, 0])  # Default to identity quaternion
+                quaternion = data.get('quaternion', [1, 0, 0, 0])  # default to identity quaternion
                 return (position[0], position[1], position[2], quaternion)
     except Exception as e:
         print(f"Warning: Could not read camera position: {e}")
@@ -37,32 +30,19 @@ def get_camera_position_from_slam():
 
 
 def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, start_camera_data, end_camera_data, success):
-    """
-    Log test results to the calibration file.
-    
-    Args:
-        log_file: File object to write to
-        test_name: Name of the test
-        target_movement: Target movement [y, x, theta]
-        start_pose: Starting robot pose [x, y, theta]
-        end_pose: Ending robot pose [x, y, theta]
-        start_camera_data: Starting camera data (x, y, z, quaternion) from SLAM
-        end_camera_data: Ending camera data (x, y, z, quaternion) from SLAM
-        success: Whether the test was successful
-    """
     log_file.write(f"\n{'='*60}\n")
     log_file.write(f"TEST: {test_name}\n")
     log_file.write(f"TIMESTAMP: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
     log_file.write(f"{'='*60}\n")
     
-    # Target movement
+    # target movement
     log_file.write(f"TARGET MOVEMENT: [y={target_movement[0]:.3f}, x={target_movement[1]:.3f}, theta={np.degrees(target_movement[2]):.1f}°]\n")
     
-    # Calculated wheel (robot odometry) start and end pose
+    # calculated wheel (robot odometry) start and end pose
     log_file.write(f"WHEEL ODOMETRY START POSE: [x={start_pose[0]:.3f}, y={start_pose[1]:.3f}, theta={np.degrees(start_pose[2]):.1f}°]\n")
     log_file.write(f"WHEEL ODOMETRY END POSE:   [x={end_pose[0]:.3f}, y={end_pose[1]:.3f}, theta={np.degrees(end_pose[2]):.1f}°]\n")
     
-    # Calculated wheel diff
+    # calculated wheel diff
     actual_movement = end_pose - start_pose
     actual_distance = np.linalg.norm(actual_movement[:2])
     actual_rotation = actual_movement[2]
@@ -72,7 +52,7 @@ def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, 
     
     log_file.write("\n")
     
-    # Camera estimated start and end position + orientation (SLAM)
+    # camera estimated start and end position + orientation (SLAM)
     if start_camera_data is not None:
         start_pos = start_camera_data[:3]
         start_quat = start_camera_data[3] if len(start_camera_data) > 3 else [1, 0, 0, 0]
@@ -91,7 +71,7 @@ def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, 
         log_file.write(f"CAMERA ESTIMATED END POSITION (SLAM): Not available\n")
         log_file.write(f"CAMERA ESTIMATED END ORIENTATION (SLAM): Not available\n")
     
-    # Calculated camera diffs
+    # calculated camera diffs
     if start_camera_data is not None and end_camera_data is not None:
         start_pos = np.array(start_camera_data[:3])
         end_pos = np.array(end_camera_data[:3])
@@ -110,31 +90,23 @@ def log_test_result(log_file, test_name, target_movement, start_pose, end_pose, 
     
     log_file.write("\n")
     
-    # Test result
+    # test result
     log_file.write(f"TEST RESULT: {'PASSED' if success else 'FAILED'}\n")
     log_file.write(f"{'='*60}\n")
-    log_file.flush()  # Ensure it's written immediately
+    log_file.flush()  # ensure it's written immediately
 
 
 def create_calib_results_folder():
-    """Create the calib-results folder and return the path."""
     calib_dir = Path("calib-results")
     calib_dir.mkdir(exist_ok=True)
     return calib_dir
 
 
 def run_calibration_tests(robot_interface, slam_interface=None):
-    """
-    Run the full calibration test suite.
-    
-    Args:
-        robot_interface: RobotInterface instance
-        slam_interface: Optional SLAM interface for communication
-    """
     print("\n🤖 ROBOT CALIBRATION MODE")
     print("Testing basic movement commands...")
     
-    # Create results folder and log file
+    # create results folder and log file
     calib_dir = create_calib_results_folder()
     log_file_path = calib_dir / "calib.txt"
     
@@ -144,20 +116,20 @@ def run_calibration_tests(robot_interface, slam_interface=None):
         log_file.write(f"Robot Interface: {'Simulation' if robot_interface.simulate else 'Real Robot'}\n")
         log_file.write(f"{'='*60}\n")
         
-        # Get initial robot position
+        # get initial robot position
         initial_obs = robot_interface.get_obs()
         initial_pose = np.array(initial_obs["base_pose"])
         log_file.write(f"INITIAL ROBOT POSE: [x={initial_pose[0]:.3f}, y={initial_pose[1]:.3f}, theta={np.degrees(initial_pose[2]):.1f}°]\n")
         log_file.write(f"{'='*60}\n")
         
-        # Helper to extract base pose from base.get_state()
+        # helper to extract base pose from base.get_state()
         def get_base_pose(base):
             obs = base.get_state()
             if isinstance(obs, dict) and 'base_pose' in obs:
                 return np.array(obs['base_pose'])
             raise RuntimeError(f"base.get_state() did not return a dict with 'base_pose': got {obs}")
 
-        # Helper function for non-blocking movement/rotation
+        # helper function for non-blocking movement/rotation
         def move_base_to(target_pose, base, description):
             print(f"\n➡️  Command: {description}")
             while True:
@@ -181,12 +153,12 @@ def run_calibration_tests(robot_interface, slam_interface=None):
             print(f"\n[TEST {i+1}/{num_sides}] 16-gon Step {i+1}: Move forward and rotate {np.degrees(turn_angle):.1f}°")
             start_pose = get_base_pose(base)
             start_camera_pos = get_camera_position_from_slam()
-            # Calculate target pose: move forward along current heading, rotate at the same time
+            # calculate target pose: move forward along current heading, rotate at the same time
             target_x = start_pose[0] + side_length * np.cos(start_pose[2])
             target_y = start_pose[1] + side_length * np.sin(start_pose[2])
             target_theta = start_pose[2] + turn_angle
             target_pose = np.array([target_x, target_y, target_theta])
-            # Send as a single move+rotate command
+            # send as a single move+rotate command
             move_base_to(target_pose, base, f"16-gon Step {i+1}: Move {side_length:.3f}m and rotate {np.degrees(turn_angle):.1f}°")
             end_pose = get_base_pose(base)
             end_camera_pos = get_camera_position_from_slam()
@@ -202,7 +174,7 @@ def run_calibration_tests(robot_interface, slam_interface=None):
             )
             time.sleep(2)
 
-        # Final summary
+        # final summary
         final_obs = robot_interface.get_obs()
         final_pose = np.array(final_obs["base_pose"])
         total_movement = final_pose - initial_pose
@@ -254,13 +226,13 @@ def main():
             print("Please start the TidyBot server first, then run this script again.")
             return 1
     
-    # Initialize robot interface
+    # initialize robot interface
     try:
         robot_interface = RobotInterface(simulate=args.simulate)
         print("✅ Robot interface initialized successfully")
         
         if not args.simulate:
-            # Test connection
+            # test connection
             print("Testing robot connection...")
             obs = robot_interface.get_obs()
             print(f"Current robot position: {obs['base_pose']}")
@@ -275,14 +247,14 @@ def main():
             print("3. Try running with --simulate first to test the script")
         return 1
     
-    # Wait for user to confirm SLAM is running
+    # wait for user to confirm SLAM is running
     print("\n" + "="*60)
     print("IMPORTANT: Make sure the SLAM system is running in another terminal!")
     print("The SLAM system should be running with --load-state and --calib-robot")
     print("="*60)
     input("Press Enter when SLAM system is ready...")
     
-    # Run calibration tests
+    # run calibration tests
     try:
         run_calibration_tests(robot_interface)
     except KeyboardInterrupt:
@@ -291,7 +263,7 @@ def main():
         print(f"\n❌ Calibration failed with error: {e}")
         return 1
     finally:
-        # Clean up
+        # clean up
         robot_interface.close()
         print("Robot interface closed.")
     
