@@ -1594,6 +1594,25 @@ if __name__ == "__main__":
             initial_value=initial_status,
             disabled=False
         )
+        
+        # detection results
+        keyframe_display = server.gui.add_text(
+            "Keyframe",
+            initial_value="No detection yet",
+            disabled=False
+        )
+        
+        coordinates_display = server.gui.add_text(
+            "Coordinates (%)",
+            initial_value="No coordinates yet",
+            disabled=False
+        )
+        
+        confidence_display = server.gui.add_text(
+            "Confidence",
+            initial_value="No confidence yet",
+            disabled=False
+        )
     
     # add transformation adjustment sliders
     with server.gui.add_folder("Alignment Adjustment"):
@@ -2010,7 +2029,49 @@ if __name__ == "__main__":
                         print(content)
                         print("="*60)
                         
-                        # clear the file after reading
+                        # parse detection results
+                        try:
+                            parts = content.split(' | ')
+                            if len(parts) >= 4:
+                                timestamp = parts[0]
+                                object_name = parts[1] 
+                                image_name = parts[2]
+                                coordinates_str = parts[3]
+                                
+                                # extract keyframe number from image name
+                                keyframe_num = "Unknown"
+                                if "keyframe_" in image_name:
+                                    try:
+                                        # handle format
+                                        after_keyframe = image_name.split("keyframe_")[1]
+                                        if "_frame" in after_keyframe:
+                                            keyframe_part = after_keyframe.split("_frame")[0]
+                                        else:
+                                            keyframe_part = after_keyframe.split(".")[0]
+                                        keyframe_num = keyframe_part.lstrip("0") or "0"
+                                    except:
+                                        keyframe_num = "Unknown"
+                                
+                                # extract confidence if present
+                                confidence_str = "Unknown"
+                                if len(parts) >= 5 and "confidence:" in parts[4]:
+                                    try:
+                                        confidence_str = parts[4].replace("confidence:", "").strip()
+                                    except:
+                                        confidence_str = "Unknown"
+                                
+                                # update GUI displays
+                                keyframe_display.value = f"Keyframe {keyframe_num}"
+                                coordinates_display.value = coordinates_str
+                                confidence_display.value = confidence_str
+                                
+                                print(f"Updated GUI: Keyframe #{keyframe_num}, Coords: {coordinates_str}, Confidence: {confidence_str}")
+                            else:
+                                print("Could not parse detection results - unexpected format")
+                        except Exception as parse_error:
+                            print(f"Error parsing detection results: {parse_error}")
+                        
+                        # clear file after reading
                         with open(object_pos_file, 'w') as f:
                             f.write("")
                         
