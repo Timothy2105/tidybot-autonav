@@ -458,14 +458,12 @@ def send_tidybot_command(tidybot_command):
         return False
 
 
-def wait_for_robot_completion(timeout=30.0):
-    """Wait for robot command to complete by monitoring result file."""
+def wait_for_robot_completion():
     result_file = "calib-results/runtime/robot_results.txt"
-    start_time = time.time()
     
-    print("  Waiting for robot completion...")
+    print("  Waiting for robot completion (no timeout)...")
     
-    while time.time() - start_time < timeout:
+    while True:
         try:
             if os.path.exists(result_file):
                 with open(result_file, 'r') as f:
@@ -476,17 +474,18 @@ def wait_for_robot_completion(timeout=30.0):
                             # clear result file for next command
                             with open(result_file, 'w') as f:
                                 f.write("")
+                            print("  Robot command completed successfully!")
                             return True
                         elif 'success' in result and not result['success']:
                             print(f"  Robot command failed: {result.get('message', 'Unknown error')}")
+                            # clear result file even on failure
+                            with open(result_file, 'w') as f:
+                                f.write("")
                             return False
         except Exception as e:
             pass
         
         time.sleep(0.2)
-    
-    print(f"  Timeout waiting for robot completion ({timeout}s)")
-    return False
 
 
 # send with dynamic re-planning after each waypoint
@@ -904,19 +903,22 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                     if status_display:
                         status_display.value = status_message
                     return None
-                elif not has_sufficient_clearance(astar_planner, goal_row, goal_col, clearance_size=5):
-                    # find nearest point with clearance
-                    if astar_planner.is_free(goal_row, goal_col, use_eroded=True):
-                        print(f"Click position ({goal_x:.2f}, {goal_z:.2f}) is free but lacks 5x5 clearance for A* planning")
+                elif not has_sufficient_clearance(astar_planner, goal_row, goal_col, clearance_size=9):
+                    # find nearest point with 9x9 clearance for destination selection
+                    is_original_free = astar_planner.is_free(goal_row, goal_col, use_eroded=True)
+                    
+                    if is_original_free:
+                        print(f"Click position ({goal_x:.2f}, {goal_z:.2f}) is free but lacks 9x9 clearance for safe destination")
                     else:
                         print(f"Click position ({goal_x:.2f}, {goal_z:.2f}) is obstructed")
                     
-                    print("Finding nearest point with sufficient clearance for A* planning...")
+                    print("Finding nearest point with 9x9 clearance for safe destination...")
+                    required_clearance = 9  # always use 9x9 for destination selection
                     
                     # store original coordinates
                     original_goal_x, original_goal_z = goal_x, goal_z
                     
-                    nearest_safe_point = find_nearest_safe_point_with_clearance(astar_planner, goal_x, goal_z, max_search_radius=3.0, clearance_size=5)
+                    nearest_safe_point = find_nearest_safe_point_with_clearance(astar_planner, goal_x, goal_z, max_search_radius=3.0, clearance_size=required_clearance)
                     
                     if nearest_safe_point is not None:
                         safe_x, safe_z = nearest_safe_point
@@ -933,7 +935,8 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                         if distance_moved < 0.01:
                             status_message = f"LOCATION OK - Original point has sufficient clearance"
                         else:
-                            status_message = f"REDIRECTED FOR CLEARANCE - Moved {distance_moved:.2f}m to point with 5x5 clearance"
+                            clearance_text = f"{required_clearance}x{required_clearance}"
+                            status_message = f"REDIRECTED FOR CLEARANCE - Moved {distance_moved:.2f}m to point with {clearance_text} clearance"
                         
                         print(f"Using destination with clearance: ({safe_x:.2f}, {safe_z:.2f})")
                         if status_display:
@@ -954,13 +957,14 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                             )
                     else:
                         # no point found
-                        status_message = "NO SUITABLE LOCATION FOUND - No point with 5x5 clearance within 3m radius"
-                        print("Could not find any point with sufficient clearance for A* planning")
+                        clearance_text = f"{required_clearance}x{required_clearance}"
+                        status_message = f"NO SUITABLE LOCATION FOUND - No point with {clearance_text} clearance within 3m radius"
+                        print(f"Could not find any point with {clearance_text} clearance for A* planning")
                         if status_display:
                             status_display.value = status_message
                         return None
 
-                # use two-stage planning
+                # use two-stage planning (5x5 clearance for navigation)
                 path_waypoints = astar_planner.plan_safe_path(
                     start_x=start_x, 
                     start_z=start_z,
@@ -1891,40 +1895,38 @@ if __name__ == "__main__":
     
     # state management for sequential movements
     robot_moving = False
-    last_command_time = 0
+    current_command_id = 0  # track command IDs to cancel old operations
     
-    def check_robot_status():
+    def cancel_current_robot_operation():
         global robot_moving
         try:
-            if os.path.exists("calib-results/runtime/robot_results.txt"):
-                with open("calib-results/runtime/robot_results.txt", 'r') as f:
-                    content = f.read().strip()
-                    if content:
-                        result = json.loads(content)
-                        if result.get('success', False):
-                            os.makedirs(os.path.dirname("calib-results/runtime/robot_results.txt"), exist_ok=True)
-                            with open("calib-results/runtime/robot_results.txt", 'w') as f:
-                                f.write("")
-                            robot_moving = False
-                            print("Robot movement completed!")
-                            return True
+            # clear command file
+            command_file = "calib-results/runtime/robot_commands.txt"
+            if os.path.exists(command_file):
+                with open(command_file, 'w') as f:
+                    f.write("")
+            
+            # clear result file
+            result_file = "calib-results/runtime/robot_results.txt"
+            if os.path.exists(result_file):
+                with open(result_file, 'w') as f:
+                    f.write("")
+            
+            robot_moving = False
+            print("Cancelled any ongoing robot operations")
         except Exception as e:
-            pass
-        return False
+            print(f"Error cancelling robot operations: {e}")
     
     # add click handler to the invisible sphere
     @click_catcher.on_click
     def handle_click(event):
-        global robot_moving, last_command_time
+        global robot_moving, current_command_id
         
-        # check if robot is currently moving
-        if robot_moving:
-            # check if robot has finished moving
-            if check_robot_status():
-                print("Ready for next click!")
-            else:
-                print("Robot is still moving, please wait...")
-                return
+        # increment command ID
+        current_command_id += 1
+        
+        # cancel any ongoing robot operations
+        cancel_current_robot_operation()
         
         # get the click ray in world coordinates
         click_origin = np.array(event.ray_origin)
@@ -2205,14 +2207,5 @@ if __name__ == "__main__":
         
         # check for object detection results
         check_object_detection_results()
-        
-        # check robot status if it's moving
-        if robot_moving:
-            # check for timeout
-            if time.time() - last_command_time > 30:
-                print("Robot movement timeout - assuming completed")
-                robot_moving = False
-            else:
-                check_robot_status()
         
         time.sleep(1.0)
