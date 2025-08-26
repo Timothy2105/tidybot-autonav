@@ -336,6 +336,30 @@ def visualize_astar_path(server, path_waypoints):
         print(f"Error visualizing A* waypoints: {e}")
 
 
+def save_object_name(object_name):
+    object_file = "calib-results/runtime/object.txt"
+    
+    try:
+        os.makedirs(os.path.dirname(object_file), exist_ok=True)
+        with open(object_file, 'w') as f:
+            f.write(object_name.strip())
+        print(f"Saved object name '{object_name.strip()}' to {object_file}")
+        return True
+    except Exception as e:
+        print(f"Error saving object name: {e}")
+        return False
+
+def load_object_name():
+    object_file = "calib-results/runtime/object.txt"
+    
+    try:
+        if os.path.exists(object_file):
+            with open(object_file, 'r') as f:
+                return f.read().strip()
+    except Exception as e:
+        print(f"Error loading object name: {e}")
+    return None
+
 def send_tidybot_command(tidybot_command):
     command_file = "calib-results/runtime/robot_commands.txt"
     
@@ -1551,6 +1575,26 @@ if __name__ == "__main__":
             initial_value=0.5
         )
     
+    # add object detection input
+    with server.gui.add_folder("Object Detection"):
+        # load existing object name if available
+        existing_object = load_object_name()
+        initial_object = existing_object if existing_object else "chair"
+        
+        object_name_input = server.gui.add_text(
+            "Object Name",
+            initial_value=initial_object
+        )
+        
+        save_object_button = server.gui.add_button("Save Object Name")
+        
+        initial_status = f"Current object: {initial_object}" if existing_object else "Enter object name and click Save"
+        object_status_display = server.gui.add_text(
+            "Status",
+            initial_value=initial_status,
+            disabled=False
+        )
+    
     # add transformation adjustment sliders
     with server.gui.add_folder("Alignment Adjustment"):
         
@@ -1687,6 +1731,21 @@ if __name__ == "__main__":
         print("To use these values permanently, update the function:")
         print(f"create_final_transformation_matrix(hand_eye_transform, {y_rot}, {z_rot}, {x_rot}, {y_trans})")
         print("="*50)
+    
+    # object name save button callback
+    @save_object_button.on_click
+    def _(_):
+        object_name = object_name_input.value.strip()
+        if object_name:
+            if save_object_name(object_name):
+                object_status_display.value = f"Saved object: {object_name}"
+                print(f"Object name '{object_name}' saved successfully!")
+            else:
+                object_status_display.value = "Error saving object name"
+                print("Failed to save object name")
+        else:
+            object_status_display.value = "Please enter a valid object name"
+            print("Please enter a valid object name")
     
     # keep track of active marker handles
     active_marker_handles = {}

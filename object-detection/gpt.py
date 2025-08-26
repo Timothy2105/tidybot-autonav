@@ -1,4 +1,4 @@
-import os, base64, argparse, glob, re, sys
+import os, base64, argparse, glob, re, sys, time
 from io import BytesIO
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
@@ -218,15 +218,150 @@ def detect_then_verify(image_path, obj, client, detect_model, verify_model, verb
     # if verifier failed to produce a point, keep detection
     return det_coords, det_conf, "detected"
 
+def check_and_clear_object_file():
+    object_file = "calib-results/runtime/object.txt"
+    try:
+        if os.path.exists(object_file):
+            with open(object_file, 'r') as f:
+                content = f.read().strip()
+                if content:  
+                    # clear file
+                    with open(object_file, 'w') as f:
+                        f.write("")
+                    return content
+    except Exception as e:
+        print(f"Error checking object file: {e}")
+    return None
+
+def process_object_detection(target_object, keyframe_images, client, detect_model, verify_model, save_annotated, output_path):
+    for i, image_path in enumerate(keyframe_images):
+        image_name = Path(image_path).name
+        print(f"[{i+1}/{len(keyframe_images)}] {image_name}")
+
+        coords, conf, stage = detect_then_verify(
+            image_path=image_path,
+            obj=target_object,
+            client=client,
+            detect_model=detect_model,
+            verify_model=verify_model,
+            verbose=True
+        )
+
+        if coords:
+            print(f"\nFOUND COORDINATES ({stage}) in {image_name}!")
+            print(f"Coordinates: {coords}")
+            if conf is not None:
+                print(f"{CONFIDENCE_KEY.capitalize()}: {conf:.2f}")
+
+            if save_annotated:
+                actual_output = output_path or f"annotated_result.png"
+                if annotate_image_with_percent(image_path, coords, actual_output):
+                    print(f"Annotated image saved to: {actual_output}")
+                else:
+                    print("Failed to create annotated image")
+            return 0
+        else:
+            print("No valid coordinates for this frame, continuing...\n")
+
+    print(f"No coordinates found for {target_object} in any keyframe images.")
+    return 1
+
+def monitor_object_file(saved_state_dir, detect_model, verify_model, save_annotated, output_path):
+    print("Starting object monitoring mode...")
+    print("Monitoring calib-results/runtime/object.txt every 2 seconds")
+    print("Save an object name in the hand_eye_calib_viser.py GUI to start detection")
+    print("Press Ctrl+C to stop monitoring\n")
+    
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Set OPENAI_API_KEY in your environment.")
+    
+    client = OpenAI(api_key=api_key)
+    
+    # Validate directory once
+    saved_state_path = Path(saved_state_dir)
+    if not saved_state_path.exists():
+        print(f"Error: Saved-state directory {saved_state_path} does not exist")
+        return 1
+    
+    kf_imgs_dir = find_kf_imgs_dir(saved_state_path)
+    if not kf_imgs_dir:
+        print(f"Error: No kf-imgs directory found in {saved_state_path}")
+        return 1
+    
+    keyframe_images = get_keyframe_images(kf_imgs_dir)
+    if not keyframe_images:
+        print(f"Error: No keyframe images found in {kf_imgs_dir}")
+        return 1
+    
+    print(f"Ready to process {len(keyframe_images)} keyframe images")
+    print(f"Detect model: {detect_model}")
+    print(f"Verify model: {verify_model}")
+    
+    try:
+        while True:
+            # check for new object
+            target_object = check_and_clear_object_file()
+            
+            if target_object:
+                print(f"\n{'='*50}")
+                print(f"NEW OBJECT DETECTED: {target_object}")
+                print(f"{'='*50}")
+                print(f"Starting detection process...")
+                
+                # process object
+                result = process_object_detection(
+                    target_object=target_object,
+                    keyframe_images=keyframe_images,
+                    client=client,
+                    detect_model=detect_model,
+                    verify_model=verify_model,
+                    save_annotated=save_annotated,
+                    output_path=output_path
+                )
+                
+                if result == 0:
+                    print(f"Successfully found {target_object}!")
+                else:
+                    print(f"Could not find {target_object} in any keyframe")
+                
+                print(f"{'='*50}")
+                print("Returning to monitoring mode...")
+                print("Save another object name to continue detection\n")
+            
+            # wait 2 seconds
+            time.sleep(1.5)
+            
+    except KeyboardInterrupt:
+        print("\nMonitoring stopped by user")
+        return 0
+
 def main():
     parser = argparse.ArgumentParser(description='Two-stage (detect -> verify) visual point detector')
     parser.add_argument('--dir', '-d', required=True, help='Path to saved-state directory')
-    parser.add_argument('--obj', '-o', required=True, help='Object to search for (e.g., "chair", "wheel", "door")')
+    parser.add_argument('--obj', '-o', help='Object to search for (e.g., "chair", "wheel", "door")')
+    parser.add_argument('--monitor', '-m', action='store_true', help='Monitor object.txt file continuously for new objects')
     parser.add_argument('--save-annotated', '-s', action='store_true', help='Save annotated image with detected/verified coordinates')
     parser.add_argument('--output', help='Output path for annotated image (default: annotated_result.png)')
     parser.add_argument('--detect-model', default=DEFAULT_DETECT_MODEL, help=f'Detector model (default: {DEFAULT_DETECT_MODEL})')
     parser.add_argument('--verify-model', default=DEFAULT_VERIFY_MODEL, help=f'Verifier model (default: {DEFAULT_VERIFY_MODEL})')
     args = parser.parse_args()
+    
+    # monitoring mode
+    if args.monitor:
+        return monitor_object_file(
+            saved_state_dir=args.dir,
+            detect_model=args.detect_model,
+            verify_model=args.verify_model,
+            save_annotated=args.save_annotated,
+            output_path=args.output
+        )
+    
+    # single-object mode
+    if not args.obj:
+        print("Error: --obj is required when not using --monitor mode")
+        print("Use --monitor to continuously watch for objects, or --obj <object_name> for single detection")
+        return 1
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -254,37 +389,16 @@ def main():
 
     client = OpenAI(api_key=api_key)
 
-    for i, image_path in enumerate(keyframe_images):
-        image_name = Path(image_path).name
-        print(f"[{i+1}/{len(keyframe_images)}] {image_name}")
-
-        coords, conf, stage = detect_then_verify(
-            image_path=image_path,
-            obj=args.obj,
-            client=client,
-            detect_model=args.detect_model,
-            verify_model=args.verify_model,
-            verbose=True
-        )
-
-        if coords:
-            print(f"\nFOUND COORDINATES ({stage}) in {image_name}!")
-            print(f"Coordinates: {coords}")
-            if conf is not None:
-                print(f"{CONFIDENCE_KEY.capitalize()}: {conf:.2f}")
-
-            if args.save_annotated:
-                output_path = args.output or "annotated_result.png"
-                if annotate_image_with_percent(image_path, coords, output_path):
-                    print(f"Annotated image saved to: {output_path}")
-                else:
-                    print("Failed to create annotated image")
-            return 0
-        else:
-            print("No valid coordinates for this frame, continuing...\n")
-
-    print("No coordinates found in any keyframe images.")
-    return 1
+    # use refactored detection
+    return process_object_detection(
+        target_object=args.obj,
+        keyframe_images=keyframe_images,
+        client=client,
+        detect_model=args.detect_model,
+        verify_model=args.verify_model,
+        save_annotated=args.save_annotated,
+        output_path=args.output
+    )
 
 if __name__ == "__main__":
     sys.exit(main())
