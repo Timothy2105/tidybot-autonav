@@ -1059,19 +1059,6 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                         if status_display:
                             status_display.value = status_message
                             
-                        if server is not None and distance_moved >= 0.01:
-                            try:
-                                # remove existing redirect marker
-                                server.scene["/redirected_point"].remove()
-                            except:
-                                pass
-                            
-                            server.scene.add_point_cloud(
-                                "/redirected_point",
-                                points=np.array([destination_point]),
-                                colors=np.array([[0.0, 1.0, 0.0]]), 
-                                point_size=0.03,
-                            )
                     else:
                         # no point found
                         clearance_text = f"{required_clearance}x{required_clearance}"
@@ -2399,37 +2386,6 @@ if __name__ == "__main__":
                 
                 # process the clicked point for robot movement
                 process_clicked_point(point, transformation_matrix, astar_planner, server, path_status_display)
-                
-                # add a temporary marker at the detected point
-                marker_name = f"/detected_point_marker_{time.time()}"
-                marker_handle = server.scene.add_point_cloud(
-                    marker_name,
-                    points=np.array([point]),
-                    colors=np.array([[0.0, 0.8, 1.0]]),  # cyan detected point
-                    point_size=0.02,
-                )
-                
-                # store the marker handle
-                active_marker_handles[marker_name] = marker_handle
-                
-                # remove the marker after 15 seconds
-                def remove_marker(marker_name_to_remove, handle_to_remove):
-                    time.sleep(15)
-                    try:
-                        handle_to_remove.remove()
-                        if marker_name_to_remove in active_marker_handles:
-                            del active_marker_handles[marker_name_to_remove]
-                        print(f"Removed detected point marker: {marker_name_to_remove}")
-                    except Exception as e:
-                        print(f"Error removing detected point marker: {e}")
-                
-                # start new thread
-                removal_thread = threading.Thread(
-                    target=remove_marker, 
-                    args=(marker_name, marker_handle),
-                    daemon=True
-                )
-                removal_thread.start()
                 
                 print(f"Automatic robot navigation initiated for detected object!")
                 
