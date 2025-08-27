@@ -1893,8 +1893,8 @@ if __name__ == "__main__":
         )
         
         # result 3D point
-        world_point_display = server.gui.add_text(
-            "World Point",
+        point_estimate_display = server.gui.add_text(
+            "Point Estimate",
             initial_value="No 3D point yet",
             disabled=False
         )
@@ -2044,6 +2044,20 @@ if __name__ == "__main__":
             if save_object_name(object_name):
                 object_status_display.value = f"Saved object: {object_name}"
                 print(f"Object name '{object_name}' saved successfully!")
+                
+                # clear prev results
+                keyframe_display.value = "No detection yet"
+                coordinates_display.value = "No coordinates yet"
+                confidence_display.value = "No confidence yet"
+                point_estimate_display.value = "No 3D point yet"
+                
+                # remove existing detected point
+                try:
+                    server.scene["/detected_point"].remove()
+                except:
+                    pass
+                    
+                print("Cleared previous detection results")
             else:
                 object_status_display.value = "Error saving object name"
                 print("Failed to save object name")
@@ -2311,7 +2325,7 @@ if __name__ == "__main__":
                     colors=np.array([[0.0, 0.3, 1.0]]),
                     point_size=0.03,
                 )
-                world_point_display.value = f"[{point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f}]"
+                point_estimate_display.value = f"[{point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f}]"
                 print(f"Drew ray-matched point at: {point}")
             except Exception as e:
                 print(f"Error drawing ray-matched point: {e}")
