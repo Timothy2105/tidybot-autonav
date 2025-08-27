@@ -11,8 +11,43 @@ import os
 from scipy.spatial import cKDTree
 import re
 
-# baseline yaw file path
+# constants
 INITIAL_YAW_FILE = "calib-results/runtime/initial_yaw.txt"
+
+# global variables
+# click handling
+CLICK_COOLDOWN = 3.0
+_next_allowed_click = 0.0
+_click_lock = threading.Lock()
+_DEBOUNCE = 0.15
+_last_raw_click = 0.0
+
+# point cloud and visualization
+transformed_points_global = None
+transformed_axes_global = None
+kd_tree_global = None
+obstacle_grid_handle = None
+
+# robot control
+robot_moving = False
+current_command_id = 0
+
+# camera tracking
+last_camera_position = None
+camera_dot_handle = None
+camera_orientation_handle = None
+tilted_axis_handle = None
+
+# object detection
+kf_poses = None
+
+# camera intrinsics for 512x384 imgs
+K_scaled = np.array([
+    [413.84, 0.0, 254.88],
+    [0.0, 413.20, 204.24],
+    [0.0, 0.0, 1.0]
+])
+dist_coeffs = np.array([0.2624, -0.9531, -0.0054, 0.0026, 1.1633])
 
 
 def save_initial_yaw_to_file(yaw_deg, path = INITIAL_YAW_FILE):
@@ -1659,13 +1694,11 @@ if __name__ == "__main__":
     transformed_points = apply_transformation_to_points(original_points, transformed_axes)
     
     # make these variables accessible to slider callbacks
-    global transformed_points_global, transformed_axes_global
     transformed_points_global = transformed_points
     transformed_axes_global = transformed_axes
 
     # build kd-tree for nearest neighbor queries
     try:
-        global kd_tree_global
         kd_tree_global = cKDTree(transformed_points_global)
         print("KD-tree built for transformed point cloud")
     except Exception as e:
@@ -1795,8 +1828,6 @@ if __name__ == "__main__":
                 colors.append(color)
         
         return np.array(points), np.array(colors)
-    
-    obstacle_grid_handle = None
     
     def update_obstacle_grid():
         global obstacle_grid_handle
@@ -1974,16 +2005,16 @@ if __name__ == "__main__":
             point_size=0.003,
         )
         
-        # update transformed axes
-        try:
-            server.scene["/transformed_axes"].remove()
-        except:
-            pass
-        
-        transformed_rotation = R.from_matrix(transformed_axes_global[:3, :3]).as_quat()
-        transformed_quaternion = np.array([transformed_rotation[3], transformed_rotation[0], transformed_rotation[1], transformed_rotation[2]])
-        transformed_position = transformed_axes_global[:3, 3]
-        server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
+        # update transformed axes (commented out - not needed)
+        # try:
+        #     server.scene["/transformed_axes"].remove()
+        # except:
+        #     pass
+        # 
+        # transformed_rotation = R.from_matrix(transformed_axes_global[:3, :3]).as_quat()
+        # transformed_quaternion = np.array([transformed_rotation[3], transformed_rotation[0], transformed_rotation[1], transformed_rotation[2]])
+        # transformed_position = transformed_axes_global[:3, 3]
+        # server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
         
         print(f"Updated transformation: Y={y_rot:.1f}°, Z={z_rot:.1f}°, X={x_rot:.1f}°, Y_trans={y_trans:.3f}m")
     
@@ -2076,9 +2107,7 @@ if __name__ == "__main__":
     # initial obstacle grid update
     update_obstacle_grid()
     
-    # state management for sequential movements
-    robot_moving = False
-    current_command_id = 0  # track command IDs to cancel old operations
+    # state management for sequential movements (globals already defined at top)
     
     def cancel_current_robot_operation():
         global robot_moving
@@ -2103,7 +2132,20 @@ if __name__ == "__main__":
     # add click handler to the invisible sphere
     @click_catcher.on_click
     def handle_click(event):
-        global robot_moving, current_command_id
+        global robot_moving, current_command_id, _next_allowed_click, _last_raw_click
+        
+        now = time.monotonic()
+        with _click_lock:
+            if now - _last_raw_click < _DEBOUNCE:
+                return
+            _last_raw_click = now
+            
+            if now < _next_allowed_click:
+                remaining = _next_allowed_click - now
+                print(f"Click cooldown active! Please wait {remaining:.1f} more seconds before clicking again.")
+                return
+            _next_allowed_click = now + CLICK_COOLDOWN
+            print(f"Click registered! Next click available in {CLICK_COOLDOWN:.1f} seconds.")
         
         # increment command ID
         current_command_id += 1
@@ -2209,12 +2251,6 @@ if __name__ == "__main__":
 
     print("Visualization started!")
     print("Red dot shows current camera position (updates every 2 seconds)")
-
-    # continuous camera position tracking
-    last_camera_position = None
-    camera_dot_handle = None
-    camera_orientation_handle = None
-    tilted_axis_handle = None
     
     def update_camera_position():
         global last_camera_position, camera_dot_handle, camera_orientation_handle, tilted_axis_handle
