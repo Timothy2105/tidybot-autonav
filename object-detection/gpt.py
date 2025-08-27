@@ -288,7 +288,14 @@ def process_object_detection(target_object, keyframe_images, client, detect_mode
             save_detection_results(target_object, image_name, coords, conf, stage)
 
             if save_annotated:
-                actual_output = output_path or f"annotated_result.png"
+                # save annotated img
+                if output_path:
+                    actual_output = output_path
+                else:
+                    runtime_dir = "calib-results/runtime"
+                    os.makedirs(runtime_dir, exist_ok=True)
+                    actual_output = os.path.join(runtime_dir, "annotated_result.png")
+                
                 if annotate_image_with_percent(image_path, coords, actual_output):
                     print(f"Annotated image saved to: {actual_output}")
                 else:
