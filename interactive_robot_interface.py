@@ -40,6 +40,7 @@ tilted_axis_handle = None
 
 # object detection
 kf_poses = None
+new_object_detected = False
 
 # camera intrinsics for 512x384 imgs
 K_scaled = np.array([
@@ -500,29 +501,36 @@ def wait_for_robot_completion():
     
     print("  Waiting for robot completion (no timeout)...")
     
-    while True:
-        try:
-            if os.path.exists(result_file):
-                with open(result_file, 'r') as f:
-                    content = f.read().strip()
-                    if content:
-                        result = json.loads(content)
-                        if result.get('success', False):
-                            # clear result file for next command
-                            with open(result_file, 'w') as f:
-                                f.write("")
-                            print("  Robot command completed successfully!")
-                            return True
-                        elif 'success' in result and not result['success']:
-                            print(f"  Robot command failed: {result.get('message', 'Unknown error')}")
-                            # clear result file even on failure
-                            with open(result_file, 'w') as f:
-                                f.write("")
-                            return False
-        except Exception as e:
-            pass
-        
-        time.sleep(0.2)
+    # check once immediately
+    try:
+        if os.path.exists(result_file):
+            with open(result_file, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    result = json.loads(content)
+                    if result.get('success', False):
+                        # clear result file
+                        with open(result_file, 'w') as f:
+                            f.write("")
+                        print("  Robot command completed successfully!")
+                        return True
+                    elif 'success' in result and not result['success']:
+                        print(f"  Robot command failed: {result.get('message', 'Unknown error')}")
+                        # clear result file on failure
+                        with open(result_file, 'w') as f:
+                            f.write("")
+                        return False
+    except Exception as e:
+        pass
+    
+    # check if new object detected
+    global new_object_detected
+    if new_object_detected:
+        print("  NEW OBJECT DETECTED")
+        return False
+    
+    # main loop continues checking for new object detection
+    return False
 
 
 # send with dynamic re-planning after each waypoint
@@ -545,6 +553,12 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
     max_waypoints = 20
     
     while waypoint_count < max_waypoints:
+        # check if a new object was detected    
+        global new_object_detected
+        if new_object_detected:
+            print("NEW OBJECT DETECTED")
+            new_object_detected = False  # reset flag
+            return False 
         # get current camera position and transform
         try:
             current_camera_position, current_quaternion, _ = read_camera_position()
@@ -2184,7 +2198,7 @@ if __name__ == "__main__":
                 closest_distance = distances[closest_idx]
                 
                 # only register as a click if the point is close enough to the ray
-                if closest_distance < 0.05: # 5cm threshold
+                if closest_distance < 0.15: # 15cm threshold
                     closest_point = transformed_points[closest_idx]
                     coord_str = f"[{closest_point[0]:.3f}, {closest_point[1]:.3f}, {closest_point[2]:.3f}]"
                     print(f"Clicked point coordinates: {coord_str}")
@@ -2368,6 +2382,57 @@ if __name__ == "__main__":
                 )
                 point_estimate_display.value = f"[{point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f}]"
                 print(f"Drew ray-matched point at: {point}")
+                
+                # cancel ops
+                print("new request detected - cancelling any ongoing robot operations")
+                cancel_current_robot_operation()
+                global new_object_detected
+                new_object_detected = True
+                
+                # automatic click
+                print("Object detection found 3D point!")
+                print(f"Simulating click on point: {point}")
+                
+                # update GUI display
+                coord_str = f"[{point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f}]"
+                coord_display.value = coord_str
+                
+                # process the clicked point for robot movement
+                process_clicked_point(point, transformation_matrix, astar_planner, server, path_status_display)
+                
+                # add a temporary marker at the detected point
+                marker_name = f"/detected_point_marker_{time.time()}"
+                marker_handle = server.scene.add_point_cloud(
+                    marker_name,
+                    points=np.array([point]),
+                    colors=np.array([[0.0, 0.8, 1.0]]),  # cyan detected point
+                    point_size=0.02,
+                )
+                
+                # store the marker handle
+                active_marker_handles[marker_name] = marker_handle
+                
+                # remove the marker after 15 seconds
+                def remove_marker(marker_name_to_remove, handle_to_remove):
+                    time.sleep(15)
+                    try:
+                        handle_to_remove.remove()
+                        if marker_name_to_remove in active_marker_handles:
+                            del active_marker_handles[marker_name_to_remove]
+                        print(f"Removed detected point marker: {marker_name_to_remove}")
+                    except Exception as e:
+                        print(f"Error removing detected point marker: {e}")
+                
+                # start new thread
+                removal_thread = threading.Thread(
+                    target=remove_marker, 
+                    args=(marker_name, marker_handle),
+                    daemon=True
+                )
+                removal_thread.start()
+                
+                print(f"Automatic robot navigation initiated for detected object!")
+                
             except Exception as e:
                 print(f"Error drawing ray-matched point: {e}")
         object_pos_file = "calib-results/runtime/object_pos.txt"
