@@ -489,7 +489,7 @@ def wait_for_robot_completion():
 
 
 # send with dynamic re-planning after each waypoint
-def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw, server):
+def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw, server, original_clicked_point=None):
     global astar_planner, transformation_matrix
     
     if not path_waypoints or len(path_waypoints) < 2:
@@ -499,6 +499,10 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
     # store the final destination
     final_destination = path_waypoints[-1]
     print(f"Starting dynamic A* navigation to final destination: ({final_destination[0]:.2f}, {final_destination[1]:.2f})")
+    
+    # if we have an original clicked point, show that we'll rotate to face it at the end
+    if original_clicked_point is not None:
+        print(f"After reaching destination, will rotate to face original clicked point: ({original_clicked_point[0]:.2f}, {original_clicked_point[2]:.2f})")
     
     waypoint_count = 0
     max_waypoints = 20
@@ -521,6 +525,68 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
             
             if distance_to_goal < 0.3:  # within 30cm of destination
                 print(f"Reached destination! Distance to goal: {distance_to_goal:.3f}m")
+                
+                # rotate to face original clicked point
+                if original_clicked_point is not None:
+                    original_x, original_z = original_clicked_point[0], original_clicked_point[2]
+                    destination_distance = np.sqrt((original_x - final_destination[0])**2 + (original_z - final_destination[1])**2)
+                    
+                    if destination_distance > 0.1:
+                        print(f"\nRotating to face original clicked point")
+                        print(f"Original clicked point: ({original_x:.2f}, {original_z:.2f})")
+                        print(f"Current destination: ({final_destination[0]:.2f}, {final_destination[1]:.2f})")
+                        print(f"Distance between them: {destination_distance:.2f}m")
+                        
+                        # calculate direction to original clicked point
+                        world_x_to_original = original_x - current_world_pos[0]
+                        world_z_to_original = original_z - current_world_pos[1]
+                        
+                        # get current robot yaw orientation
+                        current_camera_position, current_quaternion, _ = read_camera_position()
+                        camera_transform = create_camera_transform_matrix(current_camera_position, current_quaternion)
+                        transformed_camera_matrix = apply_transformation_to_4x4_matrix(camera_transform, transformation_matrix)
+                        transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
+                        current_yaw_deg, _ = get_camera_yaw_angle(transformed_rotation, forward_is_neg_z=False)
+                        
+                        # calculate target yaw angle to face original point
+                        target_yaw_rad = np.arctan2(world_x_to_original, world_z_to_original)
+                        target_yaw_deg = np.degrees(target_yaw_rad)
+                        
+                        # calculate rotation difference
+                        final_yaw_difference = target_yaw_deg - current_yaw_deg
+                        
+                        # normalize to [-180, 180] range
+                        while final_yaw_difference > 180:
+                            final_yaw_difference -= 360
+                        while final_yaw_difference < -180:
+                            final_yaw_difference += 360
+                        
+                        print(f"Current yaw: {current_yaw_deg:.1f}°")
+                        print(f"Target yaw to face original point: {target_yaw_deg:.1f}°")
+                        print(f"Final rotation needed: {final_yaw_difference:.1f}°")
+                        
+                        # only rotate if the difference is significant (more than 5 degrees)
+                        if abs(final_yaw_difference) > 5.0:
+                            print(f"Executing final rotation of {final_yaw_difference:.1f}° to face original clicked point...")
+                            
+                            final_rotation_command = [0.0, 0.0, final_yaw_difference]
+                            if send_tidybot_command(final_rotation_command):
+                                print(f"Final rotation command sent successfully!")
+                                
+                                if wait_for_robot_completion():
+                                    print(f"Final rotation completed! Now facing original clicked point.")
+                                else:
+                                    print(f"Warning: Final rotation may not have completed properly")
+                                
+                                print(f"Waiting 1.0s for robot to settle after final rotation...")
+                                time.sleep(1.0)
+                            else:
+                                print(f"Failed to send final rotation command")
+                        else:
+                            print(f"Robot already facing original point (difference: {final_yaw_difference:.1f}°), no rotation needed")
+                    else:
+                        print(f"Destination and original clicked point are very close ({destination_distance:.2f}m), no final rotation needed")
+                
                 break
             
             # recalculate safe path from current position to destination
@@ -991,7 +1057,15 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                     # send waypoint sequence to TidyBot
                     if len(path_waypoints) > 1:
                         print("Sending A* waypoint sequence to TidyBot...")
-                        if send_astar_waypoint_sequence(path_waypoints, transformed_current, baseline_yaw, server):
+                        
+                        # determine if we need to pass original clicked point for final rotation
+                        original_point_for_rotation = None
+                        if 'original_goal_x' in locals() and 'original_goal_z' in locals():
+                            # we redirected to a safe point, so pass the original clicked point
+                            original_point_for_rotation = np.array([original_goal_x, destination_point[1], original_goal_z])
+                            print(f"Will rotate to face original clicked point ({original_goal_x:.2f}, {original_goal_z:.2f}) after reaching safe destination")
+                        
+                        if send_astar_waypoint_sequence(path_waypoints, transformed_current, baseline_yaw, server, original_point_for_rotation):
                             # waypoint sequence sent successfully
                             save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
                             print("A* waypoint sequence initiated!")
