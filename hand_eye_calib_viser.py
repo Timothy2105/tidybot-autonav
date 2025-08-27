@@ -1796,31 +1796,36 @@ if __name__ == "__main__":
         
         return np.array(points), np.array(colors)
     
+    obstacle_grid_handle = None
+    
     def update_obstacle_grid():
+        global obstacle_grid_handle
+        print(f"update_obstacle_grid called: show_obstacle_grid={show_obstacle_grid.value}, astar_planner={astar_planner is not None}")
+        
         if show_obstacle_grid.value and astar_planner is not None:
             # create grid points
             grid_points, grid_colors = create_obstacle_grid_points(astar_planner, grid_height.value)
             
             if len(grid_points) > 0:
-                # add or update obstacle grid
-                server.scene.add_point_cloud(
+                # update obstacle grid
+                obstacle_grid_handle = server.scene.add_point_cloud(
                     "/obstacle_grid",
                     points=grid_points,
                     colors=grid_colors,
                     point_size=0.01,
                 )
+                print(f"Added obstacle grid with {len(grid_points)} points")
             else:
-                # remove grid if no points
-                try:
-                    server.scene["/obstacle_grid"].remove()
-                except:
-                    pass
+                if obstacle_grid_handle is not None:
+                    obstacle_grid_handle.visible = False
+                    print("Hidden obstacle grid (no points)")
         else:
-            # remove grid when disabled
-            try:
-                server.scene["/obstacle_grid"].remove()
-            except:
-                pass
+            # hide grid
+            if obstacle_grid_handle is not None:
+                obstacle_grid_handle.visible = False
+                print("Hidden obstacle grid (disabled)")
+            else:
+                print("No obstacle grid to hide")
 
     # create GUI elements first
     with server.gui.add_folder("Coordinate Display"):
