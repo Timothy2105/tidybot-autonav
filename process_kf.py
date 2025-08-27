@@ -73,7 +73,6 @@ def convert_npz_to_image(npz_path, output_dir, use_uimg=True):
 
 
 def extract_keyframe_poses(input_dir):
-    """Extract keyframe poses from keyframes.pth and save as JSON."""
     input_dir = Path(input_dir)
     keyframes_file = input_dir / "keyframes.pth"
     
@@ -84,22 +83,22 @@ def extract_keyframe_poses(input_dir):
     try:
         print(f"Loading keyframe poses from: {keyframes_file}")
         
-        # Load the keyframes data
+        # load the keyframes data
         keyframes_data = torch.load(keyframes_file, map_location='cpu')
         
         print(f"Found {keyframes_data['n_keyframes']} keyframes")
         
-        # Extract pose information
+        # extract pose information
         poses_info = []
         
-        # Method 1: From trajectory_data (if available)
+        # from trajectory_data
         if 'trajectory_data' in keyframes_data and 'poses' in keyframes_data['trajectory_data']:
             print("Extracting poses from trajectory_data...")
             poses = keyframes_data['trajectory_data']['poses']
             timestamps = keyframes_data['trajectory_data']['pose_timestamps']
             
             for i, (pose, timestamp) in enumerate(zip(poses, timestamps)):
-                # pose is a 7-DOF Sim3: [x, y, z, qx, qy, qz, qw]
+                # pose: [x, y, z, qx, qy, qz, qw]
                 pose_array = np.array(pose).flatten()
                 
                 pose_info = {
@@ -118,13 +117,13 @@ def extract_keyframe_poses(input_dir):
                     }
                 }
                 
-                # Add scale if it's Sim3 (8 dimensions)
+                # add scale if Sim3
                 if len(pose_array) > 7:
                     pose_info['scale'] = float(pose_array[7])
                 
                 poses_info.append(pose_info)
         
-        # Method 2: From individual keyframe_data (if trajectory_data not available)
+        # from individual keyframe_data
         elif 'keyframe_data' in keyframes_data:
             print("Extracting poses from individual keyframe_data...")
             
@@ -148,7 +147,7 @@ def extract_keyframe_poses(input_dir):
                     }
                 }
                 
-                # Add scale if it's Sim3
+                # add scale if Sim3
                 if len(pose_array) > 7:
                     pose_info['scale'] = float(pose_array[7])
                 
@@ -158,18 +157,17 @@ def extract_keyframe_poses(input_dir):
             print("Warning: Could not find pose data in keyframes.pth")
             return False
         
-        # Save poses as JSON
+        # save poses as JSON
         poses_file = input_dir / "kf_poses.json"
         with open(poses_file, 'w') as f:
             json.dump(poses_info, f, indent=2)
         
         print(f"Saved {len(poses_info)} keyframe poses to: {poses_file}")
         
-        # Print summary
         if poses_info:
             print(f"  Time span: {poses_info[0]['timestamp']:.2f}s to {poses_info[-1]['timestamp']:.2f}s")
             
-            # Calculate trajectory length
+            # calculate trajectory length
             total_distance = 0
             for i in range(1, len(poses_info)):
                 prev_pos = poses_info[i-1]['position']
@@ -237,7 +235,7 @@ def main():
     print(f"Successfully converted {successful_conversions}/{len(npz_files)} files")
     print(f"Images saved to: {output_dir}")
     
-    # Also extract keyframe poses
+    # extract keyframe poses
     print(f"\nExtracting keyframe poses...")
     poses_extracted = extract_keyframe_poses(input_dir)
     
