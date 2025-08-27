@@ -7,6 +7,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+RUNTIME_DIR = Path(__file__).resolve().parents[1] / "calib-results" / "runtime"
+RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
 DEFAULT_DETECT_MODEL = os.environ.get("OPENAI_DETECT_MODEL", "gpt-4o-mini")
 DEFAULT_VERIFY_MODEL = os.environ.get("OPENAI_VERIFY_MODEL", "gpt-5")
 CONFIDENCE_KEY = "confidence" 
@@ -290,14 +293,15 @@ def process_object_detection(target_object, keyframe_images, client, detect_mode
             if save_annotated:
                 # save annotated img
                 if output_path:
-                    actual_output = output_path
+                    p = Path(output_path)
+                    actual_output = p if p.is_absolute() else (RUNTIME_DIR / p.name)
                 else:
-                    runtime_dir = "calib-results/runtime"
-                    os.makedirs(runtime_dir, exist_ok=True)
-                    actual_output = os.path.join(runtime_dir, "annotated_result.png")
-                
-                if annotate_image_with_percent(image_path, coords, actual_output):
-                    print(f"Annotated image saved to: {actual_output}")
+                    actual_output = RUNTIME_DIR / "annotated_result.png"
+
+                actual_output.parent.mkdir(parents=True, exist_ok=True)
+                print("Saving annotated image to:", os.path.abspath(str(actual_output)))
+                if annotate_image_with_percent(image_path, coords, str(actual_output)):
+                    print(f"Annotated image saved to: {actual_output.resolve()}")
                 else:
                     print("Failed to create annotated image")
             return 0
