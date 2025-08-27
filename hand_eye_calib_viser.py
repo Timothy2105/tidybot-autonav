@@ -8,6 +8,8 @@ import json
 from scipy.spatial.transform import Rotation as R
 from plyfile import PlyData, PlyElement
 import os
+from scipy.spatial import cKDTree
+import re
 
 # baseline yaw file path
 INITIAL_YAW_FILE = "calib-results/runtime/initial_yaw.txt"
@@ -1329,6 +1331,68 @@ def create_inverse_transformation_matrix(hand_eye_transform):
     return np.linalg.inv(forward_transform)
 
 
+def load_kf_poses_json(saved_folder):
+    try:
+        poses_path = os.path.join(saved_folder, "kf_poses.json")
+        if not os.path.exists(poses_path):
+            print(f"kf_poses.json not found in {saved_folder}")
+            return None
+        with open(poses_path, 'r') as f:
+            poses = json.load(f)
+        print(f"Loaded {len(poses)} keyframe poses from {poses_path}")
+        return poses
+    except Exception as e:
+        print(f"Error loading kf_poses.json: {e}")
+        return None
+
+
+def build_intrinsics(width, height, fx, fy, cx, cy):
+    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]], dtype=float)
+    return K
+
+
+def undistort_pixel(u, v, K, dist_coeffs):
+    try:
+        pts = np.array([[[u, v]]], dtype=np.float32)
+        und = cv2.undistortPoints(pts, K, dist_coeffs, P=K)
+        uu, vv = und[0, 0, 0], und[0, 0, 1]
+        return float(uu), float(vv)
+    except Exception:
+        return float(u), float(v)
+
+
+def pixel_ray_world(u, v, K, R_cw, C, dist_coeffs=None):
+    if dist_coeffs is not None:
+        u, v = undistort_pixel(u, v, K, dist_coeffs)
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    dc = np.array([(u - cx) / fx, (v - cy) / fy, 1.0], dtype=float)
+    d = R_cw @ dc
+    d /= np.linalg.norm(d)
+    return C, d
+
+
+def nearest_point_along_ray(Xw, kd_tree, origin, direction, t_near=0.2, t_far=100.0, n_samples=40, radius=0.05, max_perp=0.03):
+    best_idx, best_dist = None, float('inf')
+    ts = np.geomspace(max(t_near, 1e-3), t_far, n_samples)
+    for t in ts:
+        q = origin + t * direction
+        idxs = kd_tree.query_ball_point(q, r=radius)
+        if not idxs:
+            continue
+        for i in idxs:
+            P = Xw[i]
+            s_star = np.dot(P - origin, direction)
+            if s_star <= 0:
+                continue
+            closest = origin + s_star * direction
+            perp = np.linalg.norm(P - closest)
+            if perp < best_dist:
+                best_idx, best_dist = i, perp
+    if best_idx is not None and best_dist <= max_perp:
+        return best_idx, best_dist
+    return None, None
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hand-eye calibration visualization tool")
     parser.add_argument("--save", action="store_true", 
@@ -1358,6 +1422,16 @@ if __name__ == "__main__":
     
     # generate planning maps and initialize A* planner
     print("Initializing A* path planning...")
+
+    # load keyframe poses json
+    kf_poses = load_kf_poses_json(args.saved_folder)
+
+    # prepare intrinsics: scaled by 0.8 for 512x384
+    width, height = 512, 384
+    fx, fy = 413.84, 413.20
+    cx, cy = 254.88, 204.24
+    K_scaled = build_intrinsics(width, height, fx, fy, cx, cy)
+    dist_coeffs = np.array([0.2624, -0.9531, -0.0054, 0.0026, 1.1633], dtype=float)
     
     # generate planning maps
     print("Generating planning maps...")
@@ -1588,6 +1662,15 @@ if __name__ == "__main__":
     global transformed_points_global, transformed_axes_global
     transformed_points_global = transformed_points
     transformed_axes_global = transformed_axes
+
+    # build kd-tree for nearest neighbor queries
+    try:
+        global kd_tree_global
+        kd_tree_global = cKDTree(transformed_points_global)
+        print("KD-tree built for transformed point cloud")
+    except Exception as e:
+        kd_tree_global = None
+        print(f"Warning: Failed to build KD-tree: {e}")
     
     # always save transformed PLY for A* planning (do this first)
     transformed_ply_path = os.path.join("calib-results", "transformed_pointcloud.ply")
@@ -1806,6 +1889,13 @@ if __name__ == "__main__":
         confidence_display = server.gui.add_text(
             "Confidence",
             initial_value="No confidence yet",
+            disabled=False
+        )
+        
+        # result 3D point
+        world_point_display = server.gui.add_text(
+            "World Point",
+            initial_value="No 3D point yet",
             disabled=False
         )
     
@@ -2209,6 +2299,22 @@ if __name__ == "__main__":
                 print(f"Error in update_camera_position (continuing...): {e}")
 
     def check_object_detection_results():
+        def draw_ray_point(point):
+            try:
+                try:
+                    server.scene["/detected_point"].remove()
+                except:
+                    pass
+                server.scene.add_point_cloud(
+                    "/detected_point",
+                    points=np.array([point]),
+                    colors=np.array([[0.0, 0.3, 1.0]]),
+                    point_size=0.03,
+                )
+                world_point_display.value = f"[{point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f}]"
+                print(f"Drew ray-matched point at: {point}")
+            except Exception as e:
+                print(f"Error drawing ray-matched point: {e}")
         object_pos_file = "calib-results/runtime/object_pos.txt"
         
         try:
@@ -2259,6 +2365,66 @@ if __name__ == "__main__":
                                 confidence_display.value = confidence_str
                                 
                                 print(f"Updated GUI: Keyframe #{keyframe_num}, Coords: {coordinates_str}, Confidence: {confidence_str}")
+
+                                # ray to point matching in transformed frame
+                                try:
+                                    if kd_tree_global is None or transformed_points_global is None:
+                                        print("KD-tree or transformed points not available; cannot compute 3D point")
+                                    else:
+                                        # parse keyframe index
+                                        try:
+                                            kf_idx = int(keyframe_num)
+                                        except:
+                                            kf_idx = None
+
+                                        # parse normalized coords
+                                        nums = [float(x) for x in re.findall(r"[-+]?\d*\.?\d+", coordinates_str)]
+                                        if len(nums) >= 2:
+                                            x_raw, y_raw = nums[0], nums[1]
+                                            if '%' in coordinates_str:
+                                                u = (x_raw / 100.0) * 512.0
+                                                v = (y_raw / 100.0) * 384.0
+                                            elif 0.0 <= x_raw <= 1.5 and 0.0 <= y_raw <= 1.5:
+                                                u = x_raw * 512.0
+                                                v = y_raw * 384.0
+                                            else:
+                                                u, v = x_raw, y_raw
+                                        else:
+                                            print("Could not parse coordinates; skipping 3D point computation")
+                                            u = v = None
+
+                                        if kf_idx is not None and u is not None and v is not None and kf_poses is not None and 0 <= kf_idx < len(kf_poses):
+                                            pose = kf_poses[kf_idx]
+                                            C_world = np.array([pose['position']['x'], pose['position']['y'], pose['position']['z']], dtype=float)
+                                            quat = pose['orientation_quaternion']
+                                            R_cw = R.from_quat([quat['qx'], quat['qy'], quat['qz'], quat['qw']]).as_matrix()
+
+                                            # build T_cw
+                                            T_cw = np.eye(4)
+                                            T_cw[:3, :3] = R_cw
+                                            T_cw[:3, 3] = C_world
+
+                                            # transform into transformed frame
+                                            T_cw_trans = apply_transformation_to_4x4_matrix(T_cw, transformation_matrix)
+                                            R_cw_trans = T_cw_trans[:3, :3]
+                                            C_trans = T_cw_trans[:3, 3]
+
+                                            # compute ray
+                                            origin, direction = pixel_ray_world(u, v, K_scaled, R_cw_trans, C_trans, dist_coeffs)
+
+                                            # match nearest point along ray
+                                            idx, perp = nearest_point_along_ray(transformed_points_global, kd_tree_global, origin, direction,
+                                                                                t_near=0.2, t_far=50.0, n_samples=50, radius=0.05, max_perp=0.05)
+                                            if idx is not None:
+                                                P = transformed_points_global[idx]
+                                                print(f"Matched 3D point at index {idx} (perp={perp:.3f} m): {P}")
+                                                draw_ray_point(P)
+                                            else:
+                                                print("No suitable 3D point found near the ray; try adjusting thresholds")
+                                        else:
+                                            print("Missing pose, indices, or coordinates; skipping 3D point computation")
+                                except Exception as e:
+                                    print(f"Error computing 3D point from detection: {e}")
                             else:
                                 print("Could not parse detection results - unexpected format")
                         except Exception as parse_error:
