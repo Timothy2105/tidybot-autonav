@@ -8,9 +8,47 @@ import json
 from scipy.spatial.transform import Rotation as R
 from plyfile import PlyData, PlyElement
 import os
+from scipy.spatial import cKDTree
+import re
 
-# baseline yaw file path
+# constants
 INITIAL_YAW_FILE = "calib-results/runtime/initial_yaw.txt"
+
+# global variables
+# click handling
+CLICK_COOLDOWN = 3.0
+_next_allowed_click = 0.0
+_click_lock = threading.Lock()
+_DEBOUNCE = 0.15
+_last_raw_click = 0.0
+
+# point cloud and visualization
+transformed_points_global = None
+transformed_axes_global = None
+kd_tree_global = None
+obstacle_grid_handle = None
+
+# robot control
+robot_moving = False
+current_command_id = 0
+
+# camera tracking
+last_camera_position = None
+camera_dot_handle = None
+camera_orientation_handle = None
+tilted_axis_handle = None
+
+# object detection
+kf_poses = None
+new_object_detected = False
+
+# camera intrinsics for 512x384 imgs
+K_scaled = np.array([
+    [413.84, 0.0, 254.88],
+    [0.0, 413.20, 204.24],
+    [0.0, 0.0, 1.0]
+])
+dist_coeffs = np.array([0.2624, -0.9531, -0.0054, 0.0026, 1.1633])
 
 
 def save_initial_yaw_to_file(yaw_deg, path = INITIAL_YAW_FILE):
@@ -289,6 +327,84 @@ def load_astar_planner():
         return None
 
 
+def has_sufficient_clearance(astar_planner, row, col, clearance_size=5):
+    if astar_planner is None:
+        return False
+    
+    # check clearance size area around pt
+    half_clearance = clearance_size // 2
+    
+    for dr in range(-half_clearance, half_clearance + 1):
+        for dc in range(-half_clearance, half_clearance + 1):
+            check_row = row + dr
+            check_col = col + dc
+            
+            # check if this cell is valid and free
+            if not (astar_planner.is_valid(check_row, check_col) and 
+                    astar_planner.is_free(check_row, check_col, use_eroded=True)):
+                return False
+    
+    return True
+
+
+def find_nearest_safe_point_with_clearance(astar_planner, target_x, target_z, max_search_radius=3.0, clearance_size=5):
+    if astar_planner is None:
+        return None
+    
+    # convert target to grid coordinates
+    target_row, target_col = astar_planner.world_to_grid(target_x, target_z)
+    
+    # search in expanding squares around the target point
+    cell_size = astar_planner.cell_size
+    max_search_cells = int(max_search_radius / cell_size)
+    
+    best_distance = float('inf')
+    best_point = None
+    
+    print(f"Searching for point with {clearance_size}x{clearance_size} clearance within {max_search_radius:.1f}m...")
+    
+    # search in expanding rings
+    for radius in range(0, max_search_cells + 1):
+        found_in_ring = False
+        
+        if radius == 0:
+            # check the original point
+            check_points = [(target_row, target_col)]
+        else:
+            # check all cells at this radius
+            check_points = []
+            for dr in range(-radius, radius + 1):
+                for dc in range(-radius, radius + 1):
+                    if abs(dr) != radius and abs(dc) != radius:
+                        continue
+                    check_points.append((target_row + dr, target_col + dc))
+        
+        for check_row, check_col in check_points:
+            # check if this cell has sufficient clearance
+            if has_sufficient_clearance(astar_planner, check_row, check_col, clearance_size):
+                # convert back to world coordinates
+                world_x, world_z = astar_planner.grid_to_world(check_row, check_col)
+                
+                # calculate actual distance
+                distance = np.sqrt((world_x - target_x)**2 + (world_z - target_z)**2)
+                
+                if distance < best_distance:
+                    best_distance = distance
+                    best_point = (world_x, world_z)
+                    found_in_ring = True
+        
+        # return closest one
+        if found_in_ring:
+            if best_distance < 0.01:
+                print(f"Original point has sufficient {clearance_size}x{clearance_size} clearance")
+            else:
+                print(f"Found point with {clearance_size}x{clearance_size} clearance {best_distance:.2f}m away from target")
+            return best_point
+    
+    print(f"No point with {clearance_size}x{clearance_size} clearance found within {max_search_radius:.1f}m radius")
+    return None
+
+
 def visualize_astar_path(server, path_waypoints):
     try:
         try:
@@ -336,6 +452,54 @@ def visualize_astar_path(server, path_waypoints):
         print(f"Error visualizing A* waypoints: {e}")
 
 
+def densify_waypoints(path_waypoints, max_step=2.0):
+    try:
+        if not path_waypoints or len(path_waypoints) < 2:
+            return path_waypoints
+        dense = [path_waypoints[0]]
+        for (x0, z0), (x1, z1) in zip(path_waypoints[:-1], path_waypoints[1:]):
+            dx = x1 - x0
+            dz = z1 - z0
+            dist = float(np.hypot(dx, dz))
+            if dist <= max_step:
+                dense.append((x1, z1))
+                continue
+            n_segments = int(np.ceil(dist / max_step))
+            for k in range(1, n_segments + 1):
+                alpha = min(1.0, k / n_segments)
+                nx = x0 + alpha * dx
+                nz = z0 + alpha * dz
+                dense.append((nx, nz))
+        return dense
+    except Exception as e:
+        print(f"Error densifying waypoints: {e}")
+        return path_waypoints
+
+
+def save_object_name(object_name):
+    object_file = "calib-results/runtime/object.txt"
+    
+    try:
+        os.makedirs(os.path.dirname(object_file), exist_ok=True)
+        with open(object_file, 'w') as f:
+            f.write(object_name.strip())
+        print(f"Saved object name '{object_name.strip()}' to {object_file}")
+        return True
+    except Exception as e:
+        print(f"Error saving object name: {e}")
+        return False
+
+def load_object_name():
+    object_file = "calib-results/runtime/object.txt"
+    
+    try:
+        if os.path.exists(object_file):
+            with open(object_file, 'r') as f:
+                return f.read().strip()
+    except Exception as e:
+        print(f"Error loading object name: {e}")
+    return None
+
 def send_tidybot_command(tidybot_command):
     command_file = "calib-results/runtime/robot_commands.txt"
     
@@ -356,39 +520,45 @@ def send_tidybot_command(tidybot_command):
         return False
 
 
-def wait_for_robot_completion(timeout=30.0):
-    """Wait for robot command to complete by monitoring result file."""
+def wait_for_robot_completion():
     result_file = "calib-results/runtime/robot_results.txt"
-    start_time = time.time()
     
-    print("  Waiting for robot completion...")
+    print("  Waiting for robot completion (no timeout)...")
     
-    while time.time() - start_time < timeout:
-        try:
-            if os.path.exists(result_file):
-                with open(result_file, 'r') as f:
-                    content = f.read().strip()
-                    if content:
-                        result = json.loads(content)
-                        if result.get('success', False):
-                            # clear result file for next command
-                            with open(result_file, 'w') as f:
-                                f.write("")
-                            return True
-                        elif 'success' in result and not result['success']:
-                            print(f"  Robot command failed: {result.get('message', 'Unknown error')}")
-                            return False
-        except Exception as e:
-            pass
-        
-        time.sleep(0.2)
+    # check once immediately
+    try:
+        if os.path.exists(result_file):
+            with open(result_file, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    result = json.loads(content)
+                    if result.get('success', False):
+                        # clear result file
+                        with open(result_file, 'w') as f:
+                            f.write("")
+                        print("  Robot command completed successfully!")
+                        return True
+                    elif 'success' in result and not result['success']:
+                        print(f"  Robot command failed: {result.get('message', 'Unknown error')}")
+                        # clear result file on failure
+                        with open(result_file, 'w') as f:
+                            f.write("")
+                        return False
+    except Exception as e:
+        pass
     
-    print(f"  Timeout waiting for robot completion ({timeout}s)")
+    # check if new object detected
+    global new_object_detected
+    if new_object_detected:
+        print("  NEW OBJECT DETECTED")
+        return False
+    
+    # main loop continues checking for new object detection
     return False
 
 
 # send with dynamic re-planning after each waypoint
-def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw, server):
+def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw, server, original_clicked_point=None):
     global astar_planner, transformation_matrix
     
     if not path_waypoints or len(path_waypoints) < 2:
@@ -399,10 +569,20 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
     final_destination = path_waypoints[-1]
     print(f"Starting dynamic A* navigation to final destination: ({final_destination[0]:.2f}, {final_destination[1]:.2f})")
     
+    # if we have an original clicked point, show that we'll rotate to face it at the end
+    if original_clicked_point is not None:
+        print(f"After reaching destination, will rotate to face original clicked point: ({original_clicked_point[0]:.2f}, {original_clicked_point[2]:.2f})")
+    
     waypoint_count = 0
     max_waypoints = 20
     
     while waypoint_count < max_waypoints:
+        # check if a new object was detected    
+        global new_object_detected
+        if new_object_detected:
+            print("NEW OBJECT DETECTED")
+            new_object_detected = False  # reset flag
+            return False 
         # get current camera position and transform
         try:
             current_camera_position, current_quaternion, _ = read_camera_position()
@@ -420,6 +600,68 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
             
             if distance_to_goal < 0.3:  # within 30cm of destination
                 print(f"Reached destination! Distance to goal: {distance_to_goal:.3f}m")
+                
+                # rotate to face original clicked point
+                if original_clicked_point is not None:
+                    original_x, original_z = original_clicked_point[0], original_clicked_point[2]
+                    destination_distance = np.sqrt((original_x - final_destination[0])**2 + (original_z - final_destination[1])**2)
+                    
+                    if destination_distance > 0.1:
+                        print(f"\nRotating to face original clicked point")
+                        print(f"Original clicked point: ({original_x:.2f}, {original_z:.2f})")
+                        print(f"Current destination: ({final_destination[0]:.2f}, {final_destination[1]:.2f})")
+                        print(f"Distance between them: {destination_distance:.2f}m")
+                        
+                        # calculate direction to original clicked point
+                        world_x_to_original = original_x - current_world_pos[0]
+                        world_z_to_original = original_z - current_world_pos[1]
+                        
+                        # get current robot yaw orientation
+                        current_camera_position, current_quaternion, _ = read_camera_position()
+                        camera_transform = create_camera_transform_matrix(current_camera_position, current_quaternion)
+                        transformed_camera_matrix = apply_transformation_to_4x4_matrix(camera_transform, transformation_matrix)
+                        transformed_rotation, _ = extract_rotation_and_translation(transformed_camera_matrix)
+                        current_yaw_deg, _ = get_camera_yaw_angle(transformed_rotation, forward_is_neg_z=False)
+                        
+                        # calculate target yaw angle to face original point
+                        target_yaw_rad = np.arctan2(world_x_to_original, world_z_to_original)
+                        target_yaw_deg = np.degrees(target_yaw_rad)
+                        
+                        # calculate rotation difference
+                        final_yaw_difference = target_yaw_deg - current_yaw_deg
+                        
+                        # normalize to [-180, 180] range
+                        while final_yaw_difference > 180:
+                            final_yaw_difference -= 360
+                        while final_yaw_difference < -180:
+                            final_yaw_difference += 360
+                        
+                        print(f"Current yaw: {current_yaw_deg:.1f}°")
+                        print(f"Target yaw to face original point: {target_yaw_deg:.1f}°")
+                        print(f"Final rotation needed: {final_yaw_difference:.1f}°")
+                        
+                        # only rotate if the difference is significant (more than 5 degrees)
+                        if abs(final_yaw_difference) > 5.0:
+                            print(f"Executing final rotation of {final_yaw_difference:.1f}° to face original clicked point...")
+                            
+                            final_rotation_command = [0.0, 0.0, final_yaw_difference]
+                            if send_tidybot_command(final_rotation_command):
+                                print(f"Final rotation command sent successfully!")
+                                
+                                if wait_for_robot_completion():
+                                    print(f"Final rotation completed! Now facing original clicked point.")
+                                else:
+                                    print(f"Warning: Final rotation may not have completed properly")
+                                
+                                print(f"Waiting 1.0s for robot to settle after final rotation...")
+                                time.sleep(1.0)
+                            else:
+                                print(f"Failed to send final rotation command")
+                        else:
+                            print(f"Robot already facing original point (difference: {final_yaw_difference:.1f}°), no rotation needed")
+                    else:
+                        print(f"Destination and original clicked point are very close ({destination_distance:.2f}m), no final rotation needed")
+                
                 break
             
             # recalculate safe path from current position to destination
@@ -434,7 +676,10 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
                 print("Failed to find safe path from current position to destination!")
                 return False
             
-            print(f"Found safe path with {len(current_path)} waypoints")
+            # densify long segments to <= 1.5m
+            current_path = densify_waypoints(current_path, max_step=1.5)
+            
+            print(f"Found safe path with {len(current_path)} waypoints (after densify)")
             
             # choose first waypoint at least MIN_HOP m. away
             MIN_HOP = 0.20
@@ -795,31 +1040,62 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                 print(f"Start grid position: ({start_row}, {start_col})")
                 print(f"Goal grid position: ({goal_row}, {goal_col})")
                 
-                # check if goal is valid and free
+                # check if goal is valid
                 if not astar_planner.is_valid(goal_row, goal_col):
                     status_message = "LOCATION OUT OF BOUNDS - Click within the mapped area"
                     print("Goal position is outside the mapped area!")
                     if status_display:
                         status_display.value = status_message
                     return None
-                elif not astar_planner.is_free(goal_row, goal_col, use_eroded=True):
-                    # check what type of obstacle
-                    planning_val = astar_planner.planning_map[goal_row, goal_col]
-                    eroded_val = astar_planner.eroded_map[goal_row, goal_col]
+                elif not has_sufficient_clearance(astar_planner, goal_row, goal_col, clearance_size=9):
+                    # find nearest point with 9x9 clearance for destination selection
+                    is_original_free = astar_planner.is_free(goal_row, goal_col, use_eroded=True)
                     
-                    if planning_val == 1:
-                        status_message = "LOCATION OBSTRUCTED - Obstacle detected at destination"
-                    elif eroded_val == 1:
-                        status_message = "LOCATION OBSTRUCTED - Too close to obstacles"
+                    if is_original_free:
+                        print(f"Click position ({goal_x:.2f}, {goal_z:.2f}) is free but lacks 9x9 clearance for safe destination")
                     else:
-                        status_message = "LOCATION OBSTRUCTED - Unknown obstacle type"
+                        print(f"Click position ({goal_x:.2f}, {goal_z:.2f}) is obstructed")
                     
-                    print(f"Goal position is not free! Planning: {planning_val}, Eroded: {eroded_val}")
-                    if status_display:
-                        status_display.value = status_message
-                    return None
+                    print("Finding nearest point with 9x9 clearance for safe destination...")
+                    required_clearance = 9  # always use 9x9 for destination selection
+                    
+                    # store original coordinates
+                    original_goal_x, original_goal_z = goal_x, goal_z
+                    
+                    nearest_safe_point = find_nearest_safe_point_with_clearance(astar_planner, goal_x, goal_z, max_search_radius=3.0, clearance_size=required_clearance)
+                    
+                    if nearest_safe_point is not None:
+                        safe_x, safe_z = nearest_safe_point
+                        
+                        # calculate distance moved
+                        distance_moved = np.sqrt((safe_x - original_goal_x)**2 + (safe_z - original_goal_z)**2)
+                        
+                        # update destination to the safe point
+                        goal_x, goal_z = safe_x, safe_z
+                        destination_point = np.array([goal_x, destination_point[1], goal_z]) 
+                        
+                        # recalculate movement result
+                        movement_result = calculate_movement(transformed_current, destination_point)
+                        if distance_moved < 0.01:
+                            status_message = f"LOCATION OK - Original point has sufficient clearance"
+                        else:
+                            clearance_text = f"{required_clearance}x{required_clearance}"
+                            status_message = f"REDIRECTED FOR CLEARANCE - Moved {distance_moved:.2f}m to point with {clearance_text} clearance"
+                        
+                        print(f"Using destination with clearance: ({safe_x:.2f}, {safe_z:.2f})")
+                        if status_display:
+                            status_display.value = status_message
+                            
+                    else:
+                        # no point found
+                        clearance_text = f"{required_clearance}x{required_clearance}"
+                        status_message = f"NO SUITABLE LOCATION FOUND - No point with {clearance_text} clearance within 3m radius"
+                        print(f"Could not find any point with {clearance_text} clearance for A* planning")
+                        if status_display:
+                            status_display.value = status_message
+                        return None
 
-                # use two-stage planning
+                # use two-stage planning (5x5 clearance for navigation)
                 path_waypoints = astar_planner.plan_safe_path(
                     start_x=start_x, 
                     start_z=start_z,
@@ -839,6 +1115,9 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                     if status_display:
                         status_display.value = status_message
                     
+                    # densify long segments to <= 1.5m
+                    path_waypoints = densify_waypoints(path_waypoints, max_step=1.5)
+                    
                     # visualize path in viser
                     if server is not None:
                         visualize_astar_path(server, path_waypoints)
@@ -846,7 +1125,15 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                     # send waypoint sequence to TidyBot
                     if len(path_waypoints) > 1:
                         print("Sending A* waypoint sequence to TidyBot...")
-                        if send_astar_waypoint_sequence(path_waypoints, transformed_current, baseline_yaw, server):
+                        
+                        # determine if we need to pass original clicked point for final rotation
+                        original_point_for_rotation = None
+                        if 'original_goal_x' in locals() and 'original_goal_z' in locals():
+                            # we redirected to a safe point, so pass the original clicked point
+                            original_point_for_rotation = np.array([original_goal_x, destination_point[1], original_goal_z])
+                            print(f"Will rotate to face original clicked point ({original_goal_x:.2f}, {original_goal_z:.2f}) after reaching safe destination")
+                        
+                        if send_astar_waypoint_sequence(path_waypoints, transformed_current, baseline_yaw, server, original_point_for_rotation):
                             # waypoint sequence sent successfully
                             save_movement_result(movement_result, "calib-results/runtime/movement_results.txt")
                             print("A* waypoint sequence initiated!")
@@ -1110,6 +1397,68 @@ def create_inverse_transformation_matrix(hand_eye_transform):
     return np.linalg.inv(forward_transform)
 
 
+def load_kf_poses_json(saved_folder):
+    try:
+        poses_path = os.path.join(saved_folder, "kf_poses.json")
+        if not os.path.exists(poses_path):
+            print(f"kf_poses.json not found in {saved_folder}")
+            return None
+        with open(poses_path, 'r') as f:
+            poses = json.load(f)
+        print(f"Loaded {len(poses)} keyframe poses from {poses_path}")
+        return poses
+    except Exception as e:
+        print(f"Error loading kf_poses.json: {e}")
+        return None
+
+
+def build_intrinsics(width, height, fx, fy, cx, cy):
+    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]], dtype=float)
+    return K
+
+
+def undistort_pixel(u, v, K, dist_coeffs):
+    try:
+        pts = np.array([[[u, v]]], dtype=np.float32)
+        und = cv2.undistortPoints(pts, K, dist_coeffs, P=K)
+        uu, vv = und[0, 0, 0], und[0, 0, 1]
+        return float(uu), float(vv)
+    except Exception:
+        return float(u), float(v)
+
+
+def pixel_ray_world(u, v, K, R_cw, C, dist_coeffs=None):
+    if dist_coeffs is not None:
+        u, v = undistort_pixel(u, v, K, dist_coeffs)
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    dc = np.array([(u - cx) / fx, (v - cy) / fy, 1.0], dtype=float)
+    d = R_cw @ dc
+    d /= np.linalg.norm(d)
+    return C, d
+
+
+def nearest_point_along_ray(Xw, kd_tree, origin, direction, t_near=0.2, t_far=100.0, n_samples=40, radius=0.05, max_perp=0.03):
+    best_idx, best_dist = None, float('inf')
+    ts = np.geomspace(max(t_near, 1e-3), t_far, n_samples)
+    for t in ts:
+        q = origin + t * direction
+        idxs = kd_tree.query_ball_point(q, r=radius)
+        if not idxs:
+            continue
+        for i in idxs:
+            P = Xw[i]
+            s_star = np.dot(P - origin, direction)
+            if s_star <= 0:
+                continue
+            closest = origin + s_star * direction
+            perp = np.linalg.norm(P - closest)
+            if perp < best_dist:
+                best_idx, best_dist = i, perp
+    if best_idx is not None and best_dist <= max_perp:
+        return best_idx, best_dist
+    return None, None
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hand-eye calibration visualization tool")
     parser.add_argument("--save", action="store_true", 
@@ -1139,6 +1488,16 @@ if __name__ == "__main__":
     
     # generate planning maps and initialize A* planner
     print("Initializing A* path planning...")
+
+    # load keyframe poses json
+    kf_poses = load_kf_poses_json(args.saved_folder)
+
+    # prepare intrinsics: scaled by 0.8 for 512x384
+    width, height = 512, 384
+    fx, fy = 413.84, 413.20
+    cx, cy = 254.88, 204.24
+    K_scaled = build_intrinsics(width, height, fx, fy, cx, cy)
+    dist_coeffs = np.array([0.2624, -0.9531, -0.0054, 0.0026, 1.1633], dtype=float)
     
     # generate planning maps
     print("Generating planning maps...")
@@ -1366,9 +1725,16 @@ if __name__ == "__main__":
     transformed_points = apply_transformation_to_points(original_points, transformed_axes)
     
     # make these variables accessible to slider callbacks
-    global transformed_points_global, transformed_axes_global
     transformed_points_global = transformed_points
     transformed_axes_global = transformed_axes
+
+    # build kd-tree for nearest neighbor queries
+    try:
+        kd_tree_global = cKDTree(transformed_points_global)
+        print("KD-tree built for transformed point cloud")
+    except Exception as e:
+        kd_tree_global = None
+        print(f"Warning: Failed to build KD-tree: {e}")
     
     # always save transformed PLY for A* planning (do this first)
     transformed_ply_path = os.path.join("calib-results", "transformed_pointcloud.ply")
@@ -1495,30 +1861,33 @@ if __name__ == "__main__":
         return np.array(points), np.array(colors)
     
     def update_obstacle_grid():
+        global obstacle_grid_handle
+        print(f"update_obstacle_grid called: show_obstacle_grid={show_obstacle_grid.value}, astar_planner={astar_planner is not None}")
+        
         if show_obstacle_grid.value and astar_planner is not None:
             # create grid points
             grid_points, grid_colors = create_obstacle_grid_points(astar_planner, grid_height.value)
             
             if len(grid_points) > 0:
-                # add or update obstacle grid
-                server.scene.add_point_cloud(
+                # update obstacle grid
+                obstacle_grid_handle = server.scene.add_point_cloud(
                     "/obstacle_grid",
                     points=grid_points,
                     colors=grid_colors,
                     point_size=0.01,
                 )
+                print(f"Added obstacle grid with {len(grid_points)} points")
             else:
-                # remove grid if no points
-                try:
-                    server.scene["/obstacle_grid"].remove()
-                except:
-                    pass
+                if obstacle_grid_handle is not None:
+                    obstacle_grid_handle.visible = False
+                    print("Hidden obstacle grid (no points)")
         else:
-            # remove grid when disabled
-            try:
-                server.scene["/obstacle_grid"].remove()
-            except:
-                pass
+            # hide grid
+            if obstacle_grid_handle is not None:
+                obstacle_grid_handle.visible = False
+                print("Hidden obstacle grid (disabled)")
+            else:
+                print("No obstacle grid to hide")
 
     # create GUI elements first
     with server.gui.add_folder("Coordinate Display"):
@@ -1549,6 +1918,52 @@ if __name__ == "__main__":
             max=2.0,
             step=0.01,
             initial_value=0.5
+        )
+    
+    # add object detection input
+    with server.gui.add_folder("Object Detection"):
+        # load existing object name if available
+        existing_object = load_object_name()
+        initial_object = existing_object if existing_object else "chair"
+        
+        object_name_input = server.gui.add_text(
+            "Object Name",
+            initial_value=initial_object
+        )
+        
+        save_object_button = server.gui.add_button("Save Object Name")
+        
+        initial_status = f"Current object: {initial_object}" if existing_object else "Enter object name and click Save"
+        object_status_display = server.gui.add_text(
+            "Status",
+            initial_value=initial_status,
+            disabled=False
+        )
+        
+        # detection results
+        keyframe_display = server.gui.add_text(
+            "Keyframe",
+            initial_value="No detection yet",
+            disabled=False
+        )
+        
+        coordinates_display = server.gui.add_text(
+            "Coordinates (%)",
+            initial_value="No coordinates yet",
+            disabled=False
+        )
+        
+        confidence_display = server.gui.add_text(
+            "Confidence",
+            initial_value="No confidence yet",
+            disabled=False
+        )
+        
+        # result 3D point
+        point_estimate_display = server.gui.add_text(
+            "Point Estimate",
+            initial_value="No 3D point yet",
+            disabled=False
         )
     
     # add transformation adjustment sliders
@@ -1621,16 +2036,16 @@ if __name__ == "__main__":
             point_size=0.003,
         )
         
-        # update transformed axes
-        try:
-            server.scene["/transformed_axes"].remove()
-        except:
-            pass
-        
-        transformed_rotation = R.from_matrix(transformed_axes_global[:3, :3]).as_quat()
-        transformed_quaternion = np.array([transformed_rotation[3], transformed_rotation[0], transformed_rotation[1], transformed_rotation[2]])
-        transformed_position = transformed_axes_global[:3, 3]
-        server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
+        # update transformed axes (commented out - not needed)
+        # try:
+        #     server.scene["/transformed_axes"].remove()
+        # except:
+        #     pass
+        # 
+        # transformed_rotation = R.from_matrix(transformed_axes_global[:3, :3]).as_quat()
+        # transformed_quaternion = np.array([transformed_rotation[3], transformed_rotation[0], transformed_rotation[1], transformed_rotation[2]])
+        # transformed_position = transformed_axes_global[:3, 3]
+        # server.scene.add_frame("/transformed_axes", wxyz=transformed_quaternion, position=transformed_position, axes_length=0.8, axes_radius=0.015)
         
         print(f"Updated transformation: Y={y_rot:.1f}°, Z={z_rot:.1f}°, X={x_rot:.1f}°, Y_trans={y_trans:.3f}m")
     
@@ -1688,48 +2103,86 @@ if __name__ == "__main__":
         print(f"create_final_transformation_matrix(hand_eye_transform, {y_rot}, {z_rot}, {x_rot}, {y_trans})")
         print("="*50)
     
+    # object name save button callback
+    @save_object_button.on_click
+    def _(_):
+        object_name = object_name_input.value.strip()
+        if object_name:
+            if save_object_name(object_name):
+                object_status_display.value = f"Saved object: {object_name}"
+                print(f"Object name '{object_name}' saved successfully!")
+                
+                # clear prev results
+                keyframe_display.value = "No detection yet"
+                coordinates_display.value = "No coordinates yet"
+                confidence_display.value = "No confidence yet"
+                point_estimate_display.value = "No 3D point yet"
+                
+                # remove existing detected point
+                try:
+                    server.scene["/detected_point"].remove()
+                except:
+                    pass
+                    
+                print("Cleared previous detection results")
+            else:
+                object_status_display.value = "Error saving object name"
+                print("Failed to save object name")
+        else:
+            object_status_display.value = "Please enter a valid object name"
+            print("Please enter a valid object name")
+    
     # keep track of active marker handles
     active_marker_handles = {}
     
     # initial obstacle grid update
     update_obstacle_grid()
     
-    # state management for sequential movements
-    robot_moving = False
-    last_command_time = 0
+    # state management for sequential movements (globals already defined at top)
     
-    def check_robot_status():
+    def cancel_current_robot_operation():
         global robot_moving
         try:
-            if os.path.exists("calib-results/runtime/robot_results.txt"):
-                with open("calib-results/runtime/robot_results.txt", 'r') as f:
-                    content = f.read().strip()
-                    if content:
-                        result = json.loads(content)
-                        if result.get('success', False):
-                            os.makedirs(os.path.dirname("calib-results/runtime/robot_results.txt"), exist_ok=True)
-                            with open("calib-results/runtime/robot_results.txt", 'w') as f:
-                                f.write("")
-                            robot_moving = False
-                            print("Robot movement completed!")
-                            return True
+            # clear command file
+            command_file = "calib-results/runtime/robot_commands.txt"
+            if os.path.exists(command_file):
+                with open(command_file, 'w') as f:
+                    f.write("")
+            
+            # clear result file
+            result_file = "calib-results/runtime/robot_results.txt"
+            if os.path.exists(result_file):
+                with open(result_file, 'w') as f:
+                    f.write("")
+            
+            robot_moving = False
+            print("Cancelled any ongoing robot operations")
         except Exception as e:
-            pass
-        return False
+            print(f"Error cancelling robot operations: {e}")
     
     # add click handler to the invisible sphere
     @click_catcher.on_click
     def handle_click(event):
-        global robot_moving, last_command_time
+        global robot_moving, current_command_id, _next_allowed_click, _last_raw_click
         
-        # check if robot is currently moving
-        if robot_moving:
-            # check if robot has finished moving
-            if check_robot_status():
-                print("Ready for next click!")
-            else:
-                print("Robot is still moving, please wait...")
+        now = time.monotonic()
+        with _click_lock:
+            if now - _last_raw_click < _DEBOUNCE:
                 return
+            _last_raw_click = now
+            
+            if now < _next_allowed_click:
+                remaining = _next_allowed_click - now
+                print(f"Click cooldown active! Please wait {remaining:.1f} more seconds before clicking again.")
+                return
+            _next_allowed_click = now + CLICK_COOLDOWN
+            print(f"Click registered! Next click available in {CLICK_COOLDOWN:.1f} seconds.")
+        
+        # increment command ID
+        current_command_id += 1
+        
+        # cancel any ongoing robot operations
+        cancel_current_robot_operation()
         
         # get the click ray in world coordinates
         click_origin = np.array(event.ray_origin)
@@ -1762,7 +2215,7 @@ if __name__ == "__main__":
                 closest_distance = distances[closest_idx]
                 
                 # only register as a click if the point is close enough to the ray
-                if closest_distance < 0.05: # 5cm threshold
+                if closest_distance < 0.15: # 15cm threshold
                     closest_point = transformed_points[closest_idx]
                     coord_str = f"[{closest_point[0]:.3f}, {closest_point[1]:.3f}, {closest_point[2]:.3f}]"
                     print(f"Clicked point coordinates: {coord_str}")
@@ -1829,12 +2282,6 @@ if __name__ == "__main__":
 
     print("Visualization started!")
     print("Red dot shows current camera position (updates every 2 seconds)")
-
-    # continuous camera position tracking
-    last_camera_position = None
-    camera_dot_handle = None
-    camera_orientation_handle = None
-    tilted_axis_handle = None
     
     def update_camera_position():
         global last_camera_position, camera_dot_handle, camera_orientation_handle, tilted_axis_handle
@@ -1937,17 +2384,174 @@ if __name__ == "__main__":
                 update_camera_position.last_error_time = time.time()
                 print(f"Error in update_camera_position (continuing...): {e}")
 
+    def check_object_detection_results():
+        def draw_ray_point(point):
+            try:
+                try:
+                    server.scene["/detected_point"].remove()
+                except:
+                    pass
+                server.scene.add_point_cloud(
+                    "/detected_point",
+                    points=np.array([point]),
+                    colors=np.array([[0.0, 0.3, 1.0]]),
+                    point_size=0.03,
+                )
+                point_estimate_display.value = f"[{point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f}]"
+                print(f"Drew ray-matched point at: {point}")
+                
+                # cancel ops
+                print("new request detected - cancelling any ongoing robot operations")
+                cancel_current_robot_operation()
+                global new_object_detected
+                new_object_detected = True
+                
+                # automatic click
+                print("Object detection found 3D point!")
+                print(f"Simulating click on point: {point}")
+                
+                # update GUI display
+                coord_str = f"[{point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f}]"
+                coord_display.value = coord_str
+                
+                # process the clicked point for robot movement
+                process_clicked_point(point, transformation_matrix, astar_planner, server, path_status_display)
+                
+                print(f"Automatic robot navigation initiated for detected object!")
+                
+            except Exception as e:
+                print(f"Error drawing ray-matched point: {e}")
+        object_pos_file = "calib-results/runtime/object_pos.txt"
+        
+        try:
+            if os.path.exists(object_pos_file):
+                with open(object_pos_file, 'r') as f:
+                    content = f.read().strip()
+                    if content:
+                        print("\n" + "="*60)
+                        print("OBJECT DETECTION RESULT RECEIVED:")
+                        print("="*60)
+                        print(content)
+                        print("="*60)
+                        
+                        # parse detection results
+                        try:
+                            parts = content.split(' | ')
+                            if len(parts) >= 4:
+                                timestamp = parts[0]
+                                object_name = parts[1] 
+                                image_name = parts[2]
+                                coordinates_str = parts[3]
+                                
+                                # extract keyframe number from image name
+                                keyframe_num = "Unknown"
+                                if "keyframe_" in image_name:
+                                    try:
+                                        # handle format
+                                        after_keyframe = image_name.split("keyframe_")[1]
+                                        if "_frame" in after_keyframe:
+                                            keyframe_part = after_keyframe.split("_frame")[0]
+                                        else:
+                                            keyframe_part = after_keyframe.split(".")[0]
+                                        keyframe_num = keyframe_part.lstrip("0") or "0"
+                                    except:
+                                        keyframe_num = "Unknown"
+                                
+                                # extract confidence if present
+                                confidence_str = "Unknown"
+                                if len(parts) >= 5 and "confidence:" in parts[4]:
+                                    try:
+                                        confidence_str = parts[4].replace("confidence:", "").strip()
+                                    except:
+                                        confidence_str = "Unknown"
+                                
+                                # update GUI displays
+                                keyframe_display.value = f"Keyframe {keyframe_num}"
+                                coordinates_display.value = coordinates_str
+                                confidence_display.value = confidence_str
+                                
+                                print(f"Updated GUI: Keyframe #{keyframe_num}, Coords: {coordinates_str}, Confidence: {confidence_str}")
+
+                                # ray to point matching in transformed frame
+                                try:
+                                    if kd_tree_global is None or transformed_points_global is None:
+                                        print("KD-tree or transformed points not available; cannot compute 3D point")
+                                    else:
+                                        # parse keyframe index
+                                        try:
+                                            kf_idx = int(keyframe_num)
+                                        except:
+                                            kf_idx = None
+
+                                        # parse normalized coords
+                                        nums = [float(x) for x in re.findall(r"[-+]?\d*\.?\d+", coordinates_str)]
+                                        if len(nums) >= 2:
+                                            x_raw, y_raw = nums[0], nums[1]
+                                            if '%' in coordinates_str:
+                                                u = (x_raw / 100.0) * 512.0
+                                                v = (y_raw / 100.0) * 384.0
+                                            elif 0.0 <= x_raw <= 1.5 and 0.0 <= y_raw <= 1.5:
+                                                u = x_raw * 512.0
+                                                v = y_raw * 384.0
+                                            else:
+                                                u, v = x_raw, y_raw
+                                        else:
+                                            print("Could not parse coordinates; skipping 3D point computation")
+                                            u = v = None
+
+                                        if kf_idx is not None and u is not None and v is not None and kf_poses is not None and 0 <= kf_idx < len(kf_poses):
+                                            pose = kf_poses[kf_idx]
+                                            C_world = np.array([pose['position']['x'], pose['position']['y'], pose['position']['z']], dtype=float)
+                                            quat = pose['orientation_quaternion']
+                                            R_cw = R.from_quat([quat['qx'], quat['qy'], quat['qz'], quat['qw']]).as_matrix()
+
+                                            # build T_cw
+                                            T_cw = np.eye(4)
+                                            T_cw[:3, :3] = R_cw
+                                            T_cw[:3, 3] = C_world
+
+                                            # transform into transformed frame
+                                            T_cw_trans = apply_transformation_to_4x4_matrix(T_cw, transformation_matrix)
+                                            R_cw_trans = T_cw_trans[:3, :3]
+                                            C_trans = T_cw_trans[:3, 3]
+
+                                            # compute ray
+                                            origin, direction = pixel_ray_world(u, v, K_scaled, R_cw_trans, C_trans, dist_coeffs)
+
+                                            # match nearest point along ray
+                                            idx, perp = nearest_point_along_ray(transformed_points_global, kd_tree_global, origin, direction,
+                                                                                t_near=0.2, t_far=50.0, n_samples=50, radius=0.05, max_perp=0.05)
+                                            if idx is not None:
+                                                P = transformed_points_global[idx]
+                                                print(f"Matched 3D point at index {idx} (perp={perp:.3f} m): {P}")
+                                                draw_ray_point(P)
+                                            else:
+                                                print("No suitable 3D point found near the ray; try adjusting thresholds")
+                                        else:
+                                            print("Missing pose, indices, or coordinates; skipping 3D point computation")
+                                except Exception as e:
+                                    print(f"Error computing 3D point from detection: {e}")
+                            else:
+                                print("Could not parse detection results - unexpected format")
+                        except Exception as parse_error:
+                            print(f"Error parsing detection results: {parse_error}")
+                        
+                        # clear file after reading
+                        with open(object_pos_file, 'w') as f:
+                            f.write("")
+                        
+                        print("Object detection file cleared, ready for next detection")
+                        return content
+        except Exception as e:
+            print(f"Error checking object detection results: {e}")
+        
+        return None
+
     while True:
         # update camera position every 2 seconds
         update_camera_position()
         
-        # check robot status if it's moving
-        if robot_moving:
-            # check for timeout
-            if time.time() - last_command_time > 30:
-                print("Robot movement timeout - assuming completed")
-                robot_moving = False
-            else:
-                check_robot_status()
+        # check for object detection results
+        check_object_detection_results()
         
         time.sleep(1.0)
