@@ -452,6 +452,30 @@ def visualize_astar_path(server, path_waypoints):
         print(f"Error visualizing A* waypoints: {e}")
 
 
+def densify_waypoints(path_waypoints, max_step=2.0):
+    try:
+        if not path_waypoints or len(path_waypoints) < 2:
+            return path_waypoints
+        dense = [path_waypoints[0]]
+        for (x0, z0), (x1, z1) in zip(path_waypoints[:-1], path_waypoints[1:]):
+            dx = x1 - x0
+            dz = z1 - z0
+            dist = float(np.hypot(dx, dz))
+            if dist <= max_step:
+                dense.append((x1, z1))
+                continue
+            n_segments = int(np.ceil(dist / max_step))
+            for k in range(1, n_segments + 1):
+                alpha = min(1.0, k / n_segments)
+                nx = x0 + alpha * dx
+                nz = z0 + alpha * dz
+                dense.append((nx, nz))
+        return dense
+    except Exception as e:
+        print(f"Error densifying waypoints: {e}")
+        return path_waypoints
+
+
 def save_object_name(object_name):
     object_file = "calib-results/runtime/object.txt"
     
@@ -652,7 +676,10 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
                 print("Failed to find safe path from current position to destination!")
                 return False
             
-            print(f"Found safe path with {len(current_path)} waypoints")
+            # densify long segments to <= 1.5m
+            current_path = densify_waypoints(current_path, max_step=1.5)
+            
+            print(f"Found safe path with {len(current_path)} waypoints (after densify)")
             
             # choose first waypoint at least MIN_HOP m. away
             MIN_HOP = 0.20
@@ -1087,6 +1114,9 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                     
                     if status_display:
                         status_display.value = status_message
+                    
+                    # densify long segments to <= 1.5m
+                    path_waypoints = densify_waypoints(path_waypoints, max_step=1.5)
                     
                     # visualize path in viser
                     if server is not None:
