@@ -520,40 +520,45 @@ def send_tidybot_command(tidybot_command):
         return False
 
 
-def wait_for_robot_completion():
+def wait_for_robot_completion(timeout=30.0, poll=0.2):
+    """Block until robot completes or times out. Returns True on success, False otherwise."""
     result_file = "calib-results/runtime/robot_results.txt"
-    
-    print("  Waiting for robot completion (no timeout)...")
-    
-    # check once immediately
-    try:
-        if os.path.exists(result_file):
-            with open(result_file, 'r') as f:
-                content = f.read().strip()
+    start = time.time()
+    print(f"  Waiting for robot completion (timeout={timeout}s)...")
+    while time.time() - start < timeout:
+        try:
+            if os.path.exists(result_file):
+                with open(result_file, 'r') as f:
+                    content = f.read().strip()
                 if content:
-                    result = json.loads(content)
-                    if result.get('success', False):
-                        # clear result file
+                    try:
+                        result = json.loads(content)
+                    except Exception:
+                        result = {}
+                    # clear file for the next command, regardless of outcome
+                    try:
                         with open(result_file, 'w') as f:
                             f.write("")
+                    except Exception:
+                        pass
+                    if result.get('success', False):
                         print("  Robot command completed successfully!")
                         return True
-                    elif 'success' in result and not result['success']:
-                        print(f"  Robot command failed: {result.get('message', 'Unknown error')}")
-                        # clear result file on failure
-                        with open(result_file, 'w') as f:
-                            f.write("")
-                        return False
-    except Exception as e:
-        pass
-    
-    # check if new object detected
-    global new_object_detected
-    if new_object_detected:
-        print("  NEW OBJECT DETECTED")
-        return False
-    
-    # main loop continues checking for new object detection
+                    print(f"  Robot command failed: {result.get('message', 'Unknown error')}")
+                    return False
+        except Exception:
+            pass
+
+        # allow object-detection to abort the wait loop
+        global new_object_detected
+        if new_object_detected:
+            print("  NEW OBJECT DETECTED — aborting current sequence.")
+            new_object_detected = False
+            return False
+
+        time.sleep(poll)
+
+    print(f"  Timeout waiting for robot completion ({timeout}s)")
     return False
 
 
@@ -684,12 +689,12 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
             # choose first waypoint at least MIN_HOP m. away
             MIN_HOP = 0.20
             next_waypoint = current_path[1]  # default next step
-            for j in range(len(current_path) - 1, 0, -1):
+            for j in range(1, len(current_path)):
                 dx = current_path[j][0] - current_world_pos[0]
                 dz = current_path[j][1] - current_world_pos[1]
                 if np.hypot(dx, dz) >= MIN_HOP:
                     next_waypoint = current_path[j]
-                    print(f"Runtime guard: Selected waypoint {j} instead of 1 (distance: {np.hypot(dx, dz):.3f}m)")
+                    print(f"Runtime guard: Selected waypoint {j} as nearest >= {MIN_HOP:.2f}m (distance: {np.hypot(dx, dz):.3f}m)")
                     break
             
             # update visualization with current path
@@ -726,6 +731,11 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
             
             # calculate distance to move forward
             forward_distance = np.sqrt(world_x_movement**2 + world_z_movement**2)
+            # safety cap to ensure step size reflects densification
+            MAX_SAFE_STEP = 1.5
+            if forward_distance > MAX_SAFE_STEP:
+                print(f"  Capping forward distance from {forward_distance:.3f}m to {MAX_SAFE_STEP:.3f}m for safety")
+                forward_distance = MAX_SAFE_STEP
             
             print(f"  Next waypoint: ({next_waypoint[0]:.2f}, {next_waypoint[1]:.2f})")
             print(f"  Direction: ({world_x_movement:.3f}, {world_z_movement:.3f})")
@@ -768,7 +778,7 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
                 print(f"  Robot current yaw: {robot_current_yaw:.1f}°")
                 print(f"  Initial baseline yaw: {baseline_yaw:.1f}°")
                 print(f"  Yaw difference from initial: {yaw_difference_from_initial:.1f}°")
-                print(f"  Local movement: forward={local_forward:.3f}m, right={local_right:.3f}m")
+                print(f"  Local movement (capped): forward={local_forward:.3f}m, right={local_right:.3f}m")
                 print(f"  Global movement (initial yaw frame): x={global_x_in_initial_frame:.3f}m, y={global_y_in_initial_frame:.3f}m")
                 print(f"  Forward command (initial yaw frame): [{forward_command[0]:.3f}, {forward_command[1]:.3f}, {forward_command[2]:.1f}]")
                 
@@ -776,23 +786,22 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
                     print(f"  Sent forward command successfully")
                     
                     if wait_for_robot_completion():
-                        print(f"  Forward movement completed!")
+                        print("  Forward movement completed!")
+                        print("  Waiting 1.0s for robot to settle and SLAM position update...")
+                        time.sleep(1.0)
+                        print("  Refreshing camera position for next iteration...")
+                        try:
+                            for _ in range(3):
+                                _ = read_camera_position()
+                                time.sleep(0.1)
+                            print("  Position refresh completed")
+                        except Exception as e:
+                            print(f"  Warning: Could not refresh position: {e}")
+                        waypoint_count += 1
                     else:
-                        print(f"  Warning: Forward movement may not have completed properly")
-                    
-                    print(f"  Waiting 1.0s for robot to settle and SLAM position update...")
-                    time.sleep(1.0)
-                    
-                    print(f"  Refreshing camera position for next iteration...")
-                    try:
-                        for i in range(3):
-                            test_pos, test_quat, _ = read_camera_position()
-                            time.sleep(0.1)
-                        print(f"  Position refresh completed")
-                    except Exception as e:
-                        print(f"  Warning: Could not refresh position: {e}")
-                    
-                    waypoint_count += 1
+                        print("  Movement did not complete; re-planning from current pose without advancing the waypoint.")
+                        time.sleep(0.5)
+                        continue
                 else:
                     print(f"  Failed to send forward command")
                     return False
