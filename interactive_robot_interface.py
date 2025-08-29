@@ -452,30 +452,6 @@ def visualize_astar_path(server, path_waypoints):
         print(f"Error visualizing A* waypoints: {e}")
 
 
-def densify_waypoints(path_waypoints, max_step=2.0):
-    try:
-        if not path_waypoints or len(path_waypoints) < 2:
-            return path_waypoints
-        dense = [path_waypoints[0]]
-        for (x0, z0), (x1, z1) in zip(path_waypoints[:-1], path_waypoints[1:]):
-            dx = x1 - x0
-            dz = z1 - z0
-            dist = float(np.hypot(dx, dz))
-            if dist <= max_step:
-                dense.append((x1, z1))
-                continue
-            n_segments = int(np.ceil(dist / max_step))
-            for k in range(1, n_segments + 1):
-                alpha = min(1.0, k / n_segments)
-                nx = x0 + alpha * dx
-                nz = z0 + alpha * dz
-                dense.append((nx, nz))
-        return dense
-    except Exception as e:
-        print(f"Error densifying waypoints: {e}")
-        return path_waypoints
-
-
 def save_object_name(object_name):
     object_file = "calib-results/runtime/object.txt"
     
@@ -520,46 +496,34 @@ def send_tidybot_command(tidybot_command):
         return False
 
 
-def wait_for_robot_completion(timeout=30.0, poll=0.2):
-    """Block until robot completes or times out. Returns True on success, False otherwise."""
+def wait_for_robot_completion():
     result_file = "calib-results/runtime/robot_results.txt"
-    start = time.time()
-    print(f"  Waiting for robot completion (timeout={timeout}s)...")
-    while time.time() - start < timeout:
+    
+    print("  Waiting for robot completion (no timeout)...")
+    
+    while True:
         try:
             if os.path.exists(result_file):
                 with open(result_file, 'r') as f:
                     content = f.read().strip()
-                if content:
-                    try:
+                    if content:
                         result = json.loads(content)
-                    except Exception:
-                        result = {}
-                    # clear file for the next command, regardless of outcome
-                    try:
-                        with open(result_file, 'w') as f:
-                            f.write("")
-                    except Exception:
-                        pass
-                    if result.get('success', False):
-                        print("  Robot command completed successfully!")
-                        return True
-                    print(f"  Robot command failed: {result.get('message', 'Unknown error')}")
-                    return False
-        except Exception:
+                        if result.get('success', False):
+                            # clear result file
+                            with open(result_file, 'w') as f:
+                                f.write("")
+                            print("  Robot command completed successfully!")
+                            return True
+                        elif 'success' in result and not result['success']:
+                            print(f"  Robot command failed: {result.get('message', 'Unknown error')}")
+                            # clear result file on failure
+                            with open(result_file, 'w') as f:
+                                f.write("")
+                            return False
+        except Exception as e:
             pass
-
-        # allow object-detection to abort the wait loop
-        global new_object_detected
-        if new_object_detected:
-            print("  NEW OBJECT DETECTED — aborting current sequence.")
-            new_object_detected = False
-            return False
-
-        time.sleep(poll)
-
-    print(f"  Timeout waiting for robot completion ({timeout}s)")
-    return False
+    
+        time.sleep(0.2)
 
 
 # send with dynamic re-planning after each waypoint
@@ -582,12 +546,6 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
     max_waypoints = 20
     
     while waypoint_count < max_waypoints:
-        # check if a new object was detected    
-        global new_object_detected
-        if new_object_detected:
-            print("NEW OBJECT DETECTED")
-            new_object_detected = False  # reset flag
-            return False 
         # get current camera position and transform
         try:
             current_camera_position, current_quaternion, _ = read_camera_position()
@@ -681,20 +639,17 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
                 print("Failed to find safe path from current position to destination!")
                 return False
             
-            # densify long segments to <= 1.5m
-            current_path = densify_waypoints(current_path, max_step=1.5)
-            
-            print(f"Found safe path with {len(current_path)} waypoints (after densify)")
+            print(f"Found safe path with {len(current_path)} waypoints")
             
             # choose first waypoint at least MIN_HOP m. away
             MIN_HOP = 0.20
             next_waypoint = current_path[1]  # default next step
-            for j in range(1, len(current_path)):
+            for j in range(len(current_path) - 1, 0, -1):
                 dx = current_path[j][0] - current_world_pos[0]
                 dz = current_path[j][1] - current_world_pos[1]
                 if np.hypot(dx, dz) >= MIN_HOP:
                     next_waypoint = current_path[j]
-                    print(f"Runtime guard: Selected waypoint {j} as nearest >= {MIN_HOP:.2f}m (distance: {np.hypot(dx, dz):.3f}m)")
+                    print(f"Runtime guard: Selected waypoint {j} instead of 1 (distance: {np.hypot(dx, dz):.3f}m)")
                     break
             
             # update visualization with current path
@@ -731,11 +686,6 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
             
             # calculate distance to move forward
             forward_distance = np.sqrt(world_x_movement**2 + world_z_movement**2)
-            # safety cap to ensure step size reflects densification
-            MAX_SAFE_STEP = 1.5
-            if forward_distance > MAX_SAFE_STEP:
-                print(f"  Capping forward distance from {forward_distance:.3f}m to {MAX_SAFE_STEP:.3f}m for safety")
-                forward_distance = MAX_SAFE_STEP
             
             print(f"  Next waypoint: ({next_waypoint[0]:.2f}, {next_waypoint[1]:.2f})")
             print(f"  Direction: ({world_x_movement:.3f}, {world_z_movement:.3f})")
@@ -778,7 +728,7 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
                 print(f"  Robot current yaw: {robot_current_yaw:.1f}°")
                 print(f"  Initial baseline yaw: {baseline_yaw:.1f}°")
                 print(f"  Yaw difference from initial: {yaw_difference_from_initial:.1f}°")
-                print(f"  Local movement (capped): forward={local_forward:.3f}m, right={local_right:.3f}m")
+                print(f"  Local movement: forward={local_forward:.3f}m, right={local_right:.3f}m")
                 print(f"  Global movement (initial yaw frame): x={global_x_in_initial_frame:.3f}m, y={global_y_in_initial_frame:.3f}m")
                 print(f"  Forward command (initial yaw frame): [{forward_command[0]:.3f}, {forward_command[1]:.3f}, {forward_command[2]:.1f}]")
                 
@@ -786,22 +736,23 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
                     print(f"  Sent forward command successfully")
                     
                     if wait_for_robot_completion():
-                        print("  Forward movement completed!")
-                        print("  Waiting 1.0s for robot to settle and SLAM position update...")
-                        time.sleep(1.0)
-                        print("  Refreshing camera position for next iteration...")
-                        try:
-                            for _ in range(3):
-                                _ = read_camera_position()
-                                time.sleep(0.1)
-                            print("  Position refresh completed")
-                        except Exception as e:
-                            print(f"  Warning: Could not refresh position: {e}")
-                        waypoint_count += 1
+                        print(f"  Forward movement completed!")
                     else:
-                        print("  Movement did not complete; re-planning from current pose without advancing the waypoint.")
-                        time.sleep(0.5)
-                        continue
+                        print(f"  Warning: Forward movement may not have completed properly")
+                    
+                    print(f"  Waiting 1.0s for robot to settle and SLAM position update...")
+                    time.sleep(1.0)
+                    
+                    print(f"  Refreshing camera position for next iteration...")
+                    try:
+                        for i in range(3):
+                            test_pos, test_quat, _ = read_camera_position()
+                            time.sleep(0.1)
+                        print(f"  Position refresh completed")
+                    except Exception as e:
+                        print(f"  Warning: Could not refresh position: {e}")
+                    
+                    waypoint_count += 1
                 else:
                     print(f"  Failed to send forward command")
                     return False
@@ -1095,6 +1046,19 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                         if status_display:
                             status_display.value = status_message
                             
+                        if server is not None and distance_moved >= 0.01:
+                            try:
+                                # remove existing redirect marker
+                                server.scene["/redirected_point"].remove()
+                            except:
+                                pass
+                            
+                            server.scene.add_point_cloud(
+                                "/redirected_point",
+                                points=np.array([destination_point]),
+                                colors=np.array([[0.0, 1.0, 0.0]]), 
+                                point_size=0.03,
+                            )
                     else:
                         # no point found
                         clearance_text = f"{required_clearance}x{required_clearance}"
@@ -1123,9 +1087,6 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                     
                     if status_display:
                         status_display.value = status_message
-                    
-                    # densify long segments to <= 1.5m
-                    path_waypoints = densify_waypoints(path_waypoints, max_step=1.5)
                     
                     # visualize path in viser
                     if server is not None:
@@ -2413,11 +2374,7 @@ if __name__ == "__main__":
                 print("new request detected - cancelling any ongoing robot operations")
                 cancel_current_robot_operation()
                 global new_object_detected
-                # interrupt any ongoing movement loops
                 new_object_detected = True
-                time.sleep(0.05)
-                # allow new movement to proceed
-                new_object_detected = False
                 
                 # automatic click
                 print("Object detection found 3D point!")
@@ -2427,8 +2384,57 @@ if __name__ == "__main__":
                 coord_str = f"[{point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f}]"
                 coord_display.value = coord_str
                 
-                # process the clicked point for robot movement
-                process_clicked_point(point, transformation_matrix, astar_planner, server, path_status_display)
+                # treat detection like manual click
+                def _run_like_click(p):
+                    try:
+                        cancel_current_robot_operation()
+                    except Exception:
+                        pass
+                    process_clicked_point(p, transformation_matrix, astar_planner, server, path_status_display)
+
+                try:
+                    global _next_allowed_click, _last_raw_click
+                    now = time.monotonic()
+                    with _click_lock:
+                        if now < _next_allowed_click:
+                            print("Auto-click suppressed by cooldown.")
+                        else:
+                            _last_raw_click = now
+                            _next_allowed_click = now + CLICK_COOLDOWN
+                            threading.Thread(target=_run_like_click, args=(point,), daemon=True).start()
+                except Exception as e:
+                    print(f"Error starting background navigation thread: {e}")
+                
+                # add a temporary marker at the detected point
+                marker_name = f"/detected_point_marker_{time.time()}"
+                marker_handle = server.scene.add_point_cloud(
+                    marker_name,
+                    points=np.array([point]),
+                    colors=np.array([[0.0, 0.8, 1.0]]),  # cyan detected point
+                    point_size=0.02,
+                )
+                
+                # store the marker handle
+                active_marker_handles[marker_name] = marker_handle
+                
+                # remove the marker after 15 seconds
+                def remove_marker(marker_name_to_remove, handle_to_remove):
+                    time.sleep(15)
+                    try:
+                        handle_to_remove.remove()
+                        if marker_name_to_remove in active_marker_handles:
+                            del active_marker_handles[marker_name_to_remove]
+                        print(f"Removed detected point marker: {marker_name_to_remove}")
+                    except Exception as e:
+                        print(f"Error removing detected point marker: {e}")
+                
+                # start new thread
+                removal_thread = threading.Thread(
+                    target=remove_marker, 
+                    args=(marker_name, marker_handle),
+                    daemon=True
+                )
+                removal_thread.start()
                 
                 print(f"Automatic robot navigation initiated for detected object!")
                 
@@ -2567,4 +2573,4 @@ if __name__ == "__main__":
         # check for object detection results
         check_object_detection_results()
         
-        time.sleep(1.0)
+        time.sleep(0.2)
