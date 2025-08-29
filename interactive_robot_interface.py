@@ -2404,7 +2404,11 @@ if __name__ == "__main__":
                 print("new request detected - cancelling any ongoing robot operations")
                 cancel_current_robot_operation()
                 global new_object_detected
+                # interrupt any ongoing movement loops
                 new_object_detected = True
+                time.sleep(0.05)
+                # allow new movement to proceed
+                new_object_detected = False
                 
                 # automatic click
                 print("Object detection found 3D point!")
