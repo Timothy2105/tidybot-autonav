@@ -913,9 +913,26 @@ def add_camera_position_dot(server, transformation_matrix):
         return None
 
 
+def _get_fresh_camera_pose(max_tries=5, delay=0.06):
+    try:
+        last_pos = None
+        last_quat = None
+        last_ts = None
+        for _ in range(max_tries):
+            pos, quat, ts = read_camera_position()
+            if pos is not None:
+                if last_pos is not None and np.allclose(pos, last_pos, atol=1e-6):
+                    return pos, quat, ts
+                last_pos, last_quat, last_ts = pos, quat, ts
+            time.sleep(delay)
+        return last_pos, last_quat, last_ts
+    except Exception:
+        return read_camera_position()
+
+
 def process_clicked_point(clicked_point, transformation_matrix, astar_planner=None, server=None, status_display=None):
     # get current camera position
-    current_camera_position, current_quaternion, _ = read_camera_position()
+    current_camera_position, current_quaternion, _ = _get_fresh_camera_pose()
     
     if current_camera_position is None:
         print("Could not read current camera position from calib-results/runtime/camera_position.txt")
@@ -1046,19 +1063,6 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                         if status_display:
                             status_display.value = status_message
                             
-                        if server is not None and distance_moved >= 0.01:
-                            try:
-                                # remove existing redirect marker
-                                server.scene["/redirected_point"].remove()
-                            except:
-                                pass
-                            
-                            server.scene.add_point_cloud(
-                                "/redirected_point",
-                                points=np.array([destination_point]),
-                                colors=np.array([[0.0, 1.0, 0.0]]), 
-                                point_size=0.03,
-                            )
                     else:
                         # no point found
                         clearance_text = f"{required_clearance}x{required_clearance}"
@@ -2390,6 +2394,8 @@ if __name__ == "__main__":
                         cancel_current_robot_operation()
                     except Exception:
                         pass
+                    # Give SLAM a heartbeat to flush camera_position.txt similar to a human pause
+                    time.sleep(0.15)
                     process_clicked_point(p, transformation_matrix, astar_planner, server, path_status_display)
 
                 try:
@@ -2404,37 +2410,6 @@ if __name__ == "__main__":
                             threading.Thread(target=_run_like_click, args=(point,), daemon=True).start()
                 except Exception as e:
                     print(f"Error starting background navigation thread: {e}")
-                
-                # add a temporary marker at the detected point
-                marker_name = f"/detected_point_marker_{time.time()}"
-                marker_handle = server.scene.add_point_cloud(
-                    marker_name,
-                    points=np.array([point]),
-                    colors=np.array([[0.0, 0.8, 1.0]]),  # cyan detected point
-                    point_size=0.02,
-                )
-                
-                # store the marker handle
-                active_marker_handles[marker_name] = marker_handle
-                
-                # remove the marker after 15 seconds
-                def remove_marker(marker_name_to_remove, handle_to_remove):
-                    time.sleep(15)
-                    try:
-                        handle_to_remove.remove()
-                        if marker_name_to_remove in active_marker_handles:
-                            del active_marker_handles[marker_name_to_remove]
-                        print(f"Removed detected point marker: {marker_name_to_remove}")
-                    except Exception as e:
-                        print(f"Error removing detected point marker: {e}")
-                
-                # start new thread
-                removal_thread = threading.Thread(
-                    target=remove_marker, 
-                    args=(marker_name, marker_handle),
-                    daemon=True
-                )
-                removal_thread.start()
                 
                 print(f"Automatic robot navigation initiated for detected object!")
                 
