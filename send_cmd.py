@@ -110,7 +110,7 @@ class RobotCommandServer:
                         print(f"Current pose: x={state[0]:.3f}, y={state[1]:.3f}, theta={np.degrees(state[2]):.1f}°")
                         pos_error = np.linalg.norm(state[:2] - target_pose[:2])
                         theta_error = np.abs(np.arctan2(np.sin(target_pose[2] - state[2]), np.cos(target_pose[2] - state[2])))
-                        if pos_error < 0.01 and theta_error < 0.01: 
+                        if pos_error < 0.01 and theta_error < 0.015: 
                             print("Target reached!")
                             break
                         time.sleep(0.1)
