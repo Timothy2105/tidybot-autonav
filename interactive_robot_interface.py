@@ -641,16 +641,24 @@ def send_astar_waypoint_sequence(path_waypoints, current_position, baseline_yaw,
             
             print(f"Found safe path with {len(current_path)} waypoints")
             
-            # choose first waypoint at least MIN_HOP m. away
+            # final segmentation of straight segments to <= 1.5m
+            current_path = segment_path_waypoints(current_path, max_step=1.5)
+            print(f"After segmentation (<=1.5m): {len(current_path)} waypoints")
+            
+            # choose next segmented waypoint
             MIN_HOP = 0.20
-            next_waypoint = current_path[1]  # default next step
-            for j in range(len(current_path) - 1, 0, -1):
-                dx = current_path[j][0] - current_world_pos[0]
-                dz = current_path[j][1] - current_world_pos[1]
-                if np.hypot(dx, dz) >= MIN_HOP:
-                    next_waypoint = current_path[j]
-                    print(f"Runtime guard: Selected waypoint {j} instead of 1 (distance: {np.hypot(dx, dz):.3f}m)")
-                    break
+            next_waypoint = current_path[1]
+            d1 = np.hypot(next_waypoint[0] - current_world_pos[0],
+                          next_waypoint[1] - current_world_pos[1])
+            if d1 < MIN_HOP and len(current_path) > 2:
+                for j in range(2, len(current_path)):
+                    dx = current_path[j][0] - current_world_pos[0]
+                    dz = current_path[j][1] - current_world_pos[1]
+                    d = np.hypot(dx, dz)
+                    if d >= MIN_HOP:
+                        next_waypoint = current_path[j]
+                        print(f"Runtime guard: advanced to waypoint {j} to satisfy MIN_HOP {MIN_HOP:.2f}m (distance: {d:.3f}m)")
+                        break
             
             # update visualization with current path
             try:
@@ -1096,6 +1104,10 @@ def process_clicked_point(clicked_point, transformation_matrix, astar_planner=No
                     if server is not None:
                         visualize_astar_path(server, path_waypoints)
                     
+                    # final segmentation of straight segments to <= 1.5m
+                    path_waypoints = segment_path_waypoints(path_waypoints, max_step=1.5)
+                    print(f"After segmentation (<=1.5m): {len(path_waypoints)} waypoints")
+                    
                     # send waypoint sequence to TidyBot
                     if len(path_waypoints) > 1:
                         print("Sending A* waypoint sequence to TidyBot...")
@@ -1431,6 +1443,30 @@ def nearest_point_along_ray(Xw, kd_tree, origin, direction, t_near=0.2, t_far=10
     if best_idx is not None and best_dist <= max_perp:
         return best_idx, best_dist
     return None, None
+
+
+def segment_path_waypoints(path_waypoints, max_step=1.5):
+    try:
+        if not path_waypoints or len(path_waypoints) < 2:
+            return path_waypoints
+        dense = [path_waypoints[0]]
+        for (x0, z0), (x1, z1) in zip(path_waypoints[:-1], path_waypoints[1:]):
+            dx = x1 - x0
+            dz = z1 - z0
+            dist = float(np.hypot(dx, dz))
+            if dist <= max_step:
+                dense.append((x1, z1))
+                continue
+            n_segments = int(np.ceil(dist / max_step))
+            for k in range(1, n_segments + 1):
+                alpha = min(1.0, k / n_segments)
+                nx = x0 + alpha * dx
+                nz = z0 + alpha * dz
+                dense.append((nx, nz))
+        return dense
+    except Exception as e:
+        print(f"Error segmenting waypoints: {e}")
+        return path_waypoints
 
 
 if __name__ == "__main__":
@@ -2394,7 +2430,6 @@ if __name__ == "__main__":
                         cancel_current_robot_operation()
                     except Exception:
                         pass
-                    # Give SLAM a heartbeat to flush camera_position.txt similar to a human pause
                     time.sleep(0.15)
                     process_clicked_point(p, transformation_matrix, astar_planner, server, path_status_display)
 
@@ -2548,4 +2583,4 @@ if __name__ == "__main__":
         # check for object detection results
         check_object_detection_results()
         
-        time.sleep(0.2)
+        time.sleep(1)
